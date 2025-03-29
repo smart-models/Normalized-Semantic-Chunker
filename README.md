@@ -146,8 +146,8 @@ The algorithm adapts automatically to different types of content:
 
 Before proceeding with any installation method, clone the repository:
 ```bash
-git clone <your-repo-url>
-cd <repo-directory>
+git clone https://github.com/smart-models/Normalized-Semantic-Chunking.git
+cd Normalized-Semantic-Chunking
 ```
 
 ### Local Installation with Uvicorn
