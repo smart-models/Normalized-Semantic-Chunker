@@ -1,0 +1,98 @@
+# Stage 1: Builder Stage - Install dependencies and build wheels if necessary
+FROM nvidia/cuda:12.1.0-base-ubuntu22.04 AS builder
+
+# Prevent apt-get prompts
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install build dependencies: Python, venv, pip, build tools
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.10 \
+    python3.10-venv \
+    python3-pip \
+    build-essential \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create and activate virtual environment
+RUN python3.10 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Upgrade pip in venv
+RUN python -m pip install --upgrade pip
+
+WORKDIR /app
+
+# Copy only requirements first to leverage cache
+# --- Path Correction 1: Specify the path relative to the build context ---
+COPY docker/requirements.txt .
+
+# Install Python dependencies into the virtual environment
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application code AFTER installing dependencies
+# --- Path Correction 2: This path is correct IF build context is project root ---
+COPY normalized_semantic_chunker.py .
+# If you had other source files, copy them here relative to project root,
+# e.g., COPY src/ ./src
+
+# Create directories needed by the app
+RUN mkdir -p /app/models /app/logs
+
+# ---
+
+# Stage 2: Final Stage - Setup runtime environment
+FROM nvidia/cuda:12.1.0-base-ubuntu22.04
+
+# Prevent apt-get prompts
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install runtime dependencies: Python runtime
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.10 \
+    libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy virtual environment from builder stage
+COPY --from=builder /opt/venv /opt/venv
+
+# Copy application code from builder stage
+# --- Path Correction 3: Source path inside builder is correct, destination is correct ---
+COPY --from=builder /app/normalized_semantic_chunker.py .
+# If you had other source files, copy them here too
+# e.g., COPY --from=builder /app/src ./src
+
+# Copy pre-created directories (important for ownership later)
+COPY --from=builder /app/models /app/models
+COPY --from=builder /app/logs /app/logs
+
+# Set environment variables for Python, CUDA, and Tokenizers
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH="/opt/venv/bin:$PATH" \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility \
+    NVIDIA_VISIBLE_DEVICES=all \
+    TOKENIZERS_PARALLELISM=false
+
+# Create a non-root user and group
+RUN groupadd -r appgroup && useradd -r -g appgroup -m -d /home/appuser -s /sbin/nologin appuser
+
+# Grant ownership of the app directory and venv to the appuser
+RUN chown -R appuser:appgroup /app /opt/venv /home/appuser && \
+    chmod -R 755 /app && \
+    chmod -R u+w /app/logs /app/models
+
+# Switch to non-root user
+USER appuser
+
+# Expose the port the app runs on
+EXPOSE 8000
+
+# Command to run the application using uvicorn
+CMD ["uvicorn", "normalized_semantic_chunker:app", \
+    "--host", "0.0.0.0", \
+    "--port", "8000", \
+    "--workers", "1", \
+    "--loop", "uvloop", \
+    "--http", "httptools"]

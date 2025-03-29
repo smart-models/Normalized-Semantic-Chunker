@@ -1,0 +1,52 @@
+name: normalized-semantic-chunker
+
+services:
+  normalized-semantic-chunker:
+    build:
+      context: ..
+      dockerfile: docker/dockerfile
+    image: normalized-semantic-chunker:latest
+    container_name: normalized-semantic-chunker
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - normalized_semantic_chunker_models:/app/models
+      - normalized_semantic_chunker_logs:/app/logs
+    environment:
+      - TOKENIZERS_PARALLELISM=false
+      - LOG_LEVEL=INFO
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [ compute, utility ]
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8000/", "||", "exit", "1" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    networks:
+      - deep-rag
+
+volumes:
+  normalized_semantic_chunker_models:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ../models
+  normalized_semantic_chunker_logs:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ../logs
+
+networks:
+  deep-rag:
+    name: deep-rag
+    driver: bridge
