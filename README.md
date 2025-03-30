@@ -198,7 +198,18 @@ cd Normalized-Semantic-Chunking
 
 1. Create required directories for persistent storage:
    ```bash
+   # Linux/macOS
    mkdir -p models logs
+   
+   # Windows CMD
+   mkdir models
+   mkdir logs
+   
+   # Windows PowerShell
+   New-Item -ItemType Directory -Path models -Force
+   New-Item -ItemType Directory -Path logs -Force
+   # Or with PowerShell alias
+   mkdir -Force models, logs
    ```
 
 2. Deploy with Docker Compose:
