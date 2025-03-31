@@ -1,5 +1,5 @@
 
-![What is it?](what_is_it.png)
+![What is it?](what_is_it.jpg)
 
 **1. Purpose of the Code**
 
