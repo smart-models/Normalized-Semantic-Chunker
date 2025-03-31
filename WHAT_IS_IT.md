@@ -1,5 +1,5 @@
 
-**Normalized Semantic Chunker API**
+![What is it?](what_is_it.png)
 
 **1. Purpose of the Code**
 
