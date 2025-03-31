@@ -285,11 +285,11 @@ try:
         print(f"Successfully chunked document into {result['metadata']['n_chunks']} chunks.")
         # Save the response to a file
         output_file = 'response.json'
+        # print("Metadata:", result['metadata'])
+        # print("First chunk:", result['chunks'][0])
         with open(output_file, 'w', encoding='utf-8') as outfile:
             json.dump(result, outfile, indent=4, ensure_ascii=False)
         print(f"Response saved to {output_file}")
-        # print("Metadata:", result['metadata'])
-        # print("First chunk:", result['chunks'][0])
 
 except FileNotFoundError:
     print(f"Error: File not found at {file_path}")
