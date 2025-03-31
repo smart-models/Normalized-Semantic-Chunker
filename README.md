@@ -140,7 +140,7 @@ The algorithm adapts automatically to different types of content:
 - Docker and Docker Compose (for Docker deployment)
 - NVIDIA GPU with CUDA support (recommended)
 - NVIDIA Container Toolkit (for GPU passthrough in Docker)
-- Python 3.10+ (for manual installation)
+- Python 3.10-3.12 (Python 3.11 recommended, Python 3.13 not supported due to dependency compatibility issues)
 
 ### Getting the Code
 
@@ -155,8 +155,25 @@ cd Normalized-Semantic-Chunking
 1. Create a virtual environment:
    ```bash
    python -m venv venv
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
+   source venv/bin/activate  # On Linux/Mac
    ```
+   
+   **For Windows users:**
+   
+   * Using Command Prompt:
+   ```cmd
+   venv\Scripts\activate.bat
+   ```
+   
+   * Using PowerShell:
+   ```powershell
+   # If you encounter execution policy restrictions, run this once per session:
+   Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope Process
+   
+   # Then activate the virtual environment:
+   .\venv\Scripts\Activate.ps1
+   ```
+   > **Note:** PowerShell's default security settings may prevent script execution. The above command temporarily allows scripts for the current session only, which is safer than changing system-wide settings.
 
 2. Install dependencies:
    ```bash
@@ -174,12 +191,25 @@ cd Normalized-Semantic-Chunking
    ```
 
 4. The API will be available at `http://localhost:8000`.
+   
+   Access the API documentation and interactive testing interface at `http://localhost:8000/docs`.
 
 ### Docker Deployment (Recommended)
 
 1. Create required directories for persistent storage:
    ```bash
+   # Linux/macOS
    mkdir -p models logs
+   
+   # Windows CMD
+   mkdir models
+   mkdir logs
+   
+   # Windows PowerShell
+   New-Item -ItemType Directory -Path models -Force
+   New-Item -ItemType Directory -Path logs -Force
+   # Or with PowerShell alias
+   mkdir -Force models, logs
    ```
 
 2. Deploy with Docker Compose:
@@ -189,6 +219,8 @@ cd Normalized-Semantic-Chunking
    ```
 
 3. The API will be available at `http://localhost:8000`.
+   
+   Access the API documentation and interactive testing interface at `http://localhost:8000/docs`.
 
 ## Using the API
 
