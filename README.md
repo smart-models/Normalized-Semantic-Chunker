@@ -340,7 +340,7 @@ A successful chunking operation returns a `ChunkingResult` object:
 
 ## Contributing
 
-The Normalized Semantic Chunker is an open-source project that thrives on community contributions. Your involvement is not just welcome—it's fundamental to the project's growth, innovation, and long-term success.
+The Normalized Semantic Chunker is an open-source project that thrives on community contributions. Your involvement is not just welcome, it's fundamental to the project's growth, innovation, and long-term success.
 
 Whether you're fixing bugs, improving documentation, adding new features, or sharing ideas, every contribution helps build a better tool for everyone. We believe in the power of collaborative development and welcome participants of all skill levels.
 
