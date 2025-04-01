@@ -213,10 +213,32 @@ cd Normalized-Semantic-Chunking
    ```
 
 2. Deploy with Docker Compose:
+
+   **CPU-only deployment** (default, works on all machines):
    ```bash
    cd docker
-   docker-compose up -d
+   docker compose --profile cpu up -d
    ```
+
+   **GPU-accelerated deployment** (requires NVIDIA GPU and drivers):
+   ```bash
+   cd docker
+   docker compose --profile gpu up -d
+   ```
+
+   **Stopping the service**:
+   
+   > **Important**: Always match the `--profile` flag between your `up` and `down` commands:
+   ```bash
+   # To stop CPU deployment
+   docker compose --profile cpu down
+   
+   # To stop GPU deployment
+   docker compose --profile gpu down
+   ```
+   > This ensures Docker Compose correctly identifies and manages the specific set of containers you intended to control.
+
+   > **Note**: The GPU-accelerated deployment requires an NVIDIA GPU with appropriate drivers installed. If you don't have an NVIDIA GPU, use the CPU-only deployment.
 
 3. The API will be available at `http://localhost:8000`.
    
