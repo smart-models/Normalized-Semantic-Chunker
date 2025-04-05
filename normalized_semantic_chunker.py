@@ -165,7 +165,7 @@ def split_into_sentences(doc: str) -> List[str]:
 def get_embeddings(
     doc: List[str],
     model: str = EMBEDDER_MODEL,
-    batch_size: int = 8,
+    batch_size: int = 4,
     show_progress_bar: bool = True,
     convert_to_numpy: bool = True,
     normalize_embeddings: bool = True,
@@ -548,7 +548,7 @@ def merge_undersized_chunks(
     embeddings_dict = get_embeddings(
         doc=chunk_texts,
         model=model,
-        batch_size=4,
+        batch_size=2,
         show_progress_bar=False,
         convert_to_numpy=True,
         normalize_embeddings=True,
@@ -628,7 +628,7 @@ def merge_undersized_chunks(
         new_embedding_dict = get_embeddings(
             doc=[merged_text],
             model=model,
-            batch_size=1,
+            batch_size=2,
             show_progress_bar=False,
             convert_to_numpy=True,
             normalize_embeddings=True,
