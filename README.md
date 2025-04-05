@@ -162,7 +162,7 @@ cd Normalized-Semantic-Chunking
    
    * Using Command Prompt:
    ```cmd
-   venv\Scripts\activate.bat
+   .venv\Scripts\activate.bat
    ```
    
    * Using PowerShell:
