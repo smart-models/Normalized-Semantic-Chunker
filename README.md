@@ -171,7 +171,7 @@ cd Normalized-Semantic-Chunking
    Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope Process
    
    # Then activate the virtual environment:
-   .\venv\Scripts\Activate.ps1
+   .venv\Scripts\Activate.ps1
    ```
    > **Note:** PowerShell's default security settings may prevent script execution. The above command temporarily allows scripts for the current session only, which is safer than changing system-wide settings.
 
