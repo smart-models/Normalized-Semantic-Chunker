@@ -148,6 +148,7 @@ Before proceeding with any installation method, clone the repository:
 ```bash
 git clone https://github.com/smart-models/Normalized-Semantic-Chunker.git
 cd Normalized-Semantic-Chunker
+```
 
 ### Local Installation with Uvicorn
 
