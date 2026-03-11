@@ -1,20 +1,20 @@
 # Stage 1: Builder Stage - Install dependencies and build wheels if necessary
-FROM nvidia/cuda:12.1.0-base-ubuntu22.04 AS builder
+FROM nvidia/cuda:12.6.0-base-ubuntu24.04 AS builder
 
 # Prevent apt-get prompts
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Install build dependencies: Python, venv, pip, build tools
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.10 \
-    python3.10-venv \
+    python3.12 \
+    python3.12-venv \
     python3-pip \
     build-essential \
     git \
     && rm -rf /var/lib/apt/lists/*
 
 # Create and activate virtual environment
-RUN python3.10 -m venv /opt/venv
+RUN python3.12 -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
 # Upgrade pip in venv
@@ -41,15 +41,16 @@ RUN mkdir -p /app/models /app/logs
 # ---
 
 # Stage 2: Final Stage - Setup runtime environment
-FROM nvidia/cuda:12.1.0-base-ubuntu22.04
+FROM nvidia/cuda:12.6.0-base-ubuntu24.04
 
 # Prevent apt-get prompts
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install runtime dependencies: Python runtime
+# Install runtime dependencies: Python runtime and curl for healthcheck
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.10 \
+    python3.12 \
     libgomp1 \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -86,8 +87,17 @@ RUN chown -R appuser:appgroup /app /opt/venv /home/appuser && \
 # Switch to non-root user
 USER appuser
 
+# OCI Labels for traceability
+LABEL org.opencontainers.image.source="https://github.com/smart-models/Normalized-Semantic-Chunking"
+LABEL org.opencontainers.image.description="Normalized Semantic Chunker API"
+LABEL org.opencontainers.image.licenses="MIT"
+
 # Expose the port the app runs on
 EXPOSE 8000
+
+# Healthcheck
+HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
+    CMD curl -f http://localhost:8000/ || exit 1
 
 # Command to run the application using uvicorn
 CMD ["uvicorn", "normalized_semantic_chunker:app", \

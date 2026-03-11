@@ -3,6 +3,8 @@ name: normalized-semantic-chunker
 services:
   # 1. Define a common base service (no profile, no ports)
   base-service:
+    profiles:
+      - _base  # Dummy profile to prevent standalone startup
     build:
       context: ..
       dockerfile: docker/dockerfile
@@ -14,6 +16,9 @@ services:
     environment:
       - TOKENIZERS_PARALLELISM=false
       - LOG_LEVEL=INFO
+
+      # Authentication
+      - API_TOKEN=${API_TOKEN:-}
 
       # Cache and Threading Optimizations
       - MODEL_CACHE_TIMEOUT=${MODEL_CACHE_TIMEOUT:-3600}
@@ -30,7 +35,7 @@ services:
       - TORCH_CUDNN_V8_API_ENABLED=1
     healthcheck:
       # Healthcheck needs to target port 8000 inside the container
-      test: [ "CMD", "curl", "-f", "http://localhost:8000/", "||", "exit", "1" ]
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/ || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -46,7 +51,7 @@ services:
     profiles:
       - cpu
     ports:
-      - "${APP_PORT:-8000}:8000" 
+      - "${APP_PORT:-8001}:8000" 
 
   # 3. Define the GPU service extending the base
   gpu:
@@ -56,7 +61,7 @@ services:
     profiles:
       - gpu
     ports:
-      - "${APP_PORT:-8000}:8000" 
+      - "${APP_PORT:-8001}:8000" 
     deploy:
       resources:
         reservations:
@@ -71,13 +76,13 @@ volumes:
     driver_opts:
       type: none
       o: bind
-      device: ../models
+      device: ${MODELS_PATH:-${PWD}/../models}
   normalized_semantic_chunker_logs:
     driver: local
     driver_opts:
       type: none
       o: bind
-      device: ../logs
+      device: ${LOGS_PATH:-${PWD}/../logs}
 
 networks:
   deep-rag:

@@ -1,6 +1,6 @@
 ![GPU Accelerated](https://img.shields.io/badge/GPU-Accelerated-green)
 ![CUDA 12.6](https://img.shields.io/badge/CUDA-12.6-blue)
-![Python 3.11](https://img.shields.io/badge/Python-3.11-blue)
+![Python 3.12](https://img.shields.io/badge/Python-3.12-blue)
 ![FastAPI](https://img.shields.io/badge/FastAPI-Latest-blue)
 ![Docker](https://img.shields.io/badge/Docker-Ready-blue)
 
@@ -24,6 +24,7 @@ Whether working with long documents, varied content structures, or token-sensiti
 -   **GPU Acceleration**: CUDA-enabled for fast embedding generation using PyTorch.
 -   **Comprehensive Processing Pipeline**: From raw text to optimized chunks in a single workflow.
 -   **Universal REST API with FastAPI**: Modern, high-performance API interface with automatic documentation, data validation, and seamless integration capabilities for any system or language.
+-   **Optional Bearer Token Authentication**: Secure the API with a Bearer token via the `API_TOKEN` environment variable. When unset, authentication is disabled for easy local development.
 -   **Docker Integration**: Easy deployment with Docker and docker-compose.
 -   **Adaptive Processing**: Adjusts processing parameters based on document size for optimal resource usage.
 -   **Model Caching**: Caches embedding models with timeout for improved performance.
@@ -43,11 +44,13 @@ Whether working with long documents, varied content structures, or token-sensiti
   - [Flexibility and Customization](#flexibility-and-customization)
 - [Installation and Deployment](#installation-and-deployment)
   - [Prerequisites](#prerequisites)
+  - [Docker Image from GitHub Container Registry (Recommended)](#docker-image-from-github-container-registry-recommended)
   - [Getting the Code](#getting-the-code)
   - [Local Installation with Uvicorn](#local-installation-with-uvicorn)
-  - [Docker Deployment (Recommended)](#docker-deployment-recommended)
+  - [Building Docker Image Locally](#building-docker-image-locally)
 - [Using the API](#using-the-api)
   - [API Endpoints](#api-endpoints)
+  - [Authentication](#authentication)
   - [Example API Call](#example-api-call)
   - [Response Format](#response-format)
 - [Contributing](#contributing)
@@ -145,7 +148,44 @@ The algorithm adapts automatically to different types of content:
 - Docker and Docker Compose (for Docker deployment)
 - NVIDIA GPU with CUDA support (recommended)
 - NVIDIA Container Toolkit (for GPU passthrough in Docker)
-- Python 3.10-3.12 (Python 3.11 specifically recommended, Python 3.13+ not supported due to issues with PyTorch and sentence-transformers dependencies)
+- Python 3.10-3.12 (Python 3.12 recommended for Docker deployment, Python 3.13+ not supported due to PyTorch and sentence-transformers compatibility)
+
+### Docker Image from GitHub Container Registry (Recommended)
+
+The easiest way to get started is using the pre-built Docker image from GitHub Container Registry. This image includes CUDA support and works on both GPU and CPU machines.
+
+**Pull the image:**
+```bash
+# Latest version
+docker pull ghcr.io/smart-models/normalized-semantic-chunker:latest
+
+# Or a specific version
+docker pull ghcr.io/smart-models/normalized-semantic-chunker:1.0.0
+```
+
+**Run with GPU (recommended for best performance):**
+```bash
+docker run --gpus all -p 8000:8000 ghcr.io/smart-models/normalized-semantic-chunker:latest
+```
+
+**Run on CPU (works on any machine):**
+```bash
+docker run -p 8000:8000 ghcr.io/smart-models/normalized-semantic-chunker:latest
+```
+
+**With persistent model cache (recommended):**
+```bash
+# Create directories for persistent storage
+mkdir -p models logs
+
+# Run with mounted volumes
+docker run --gpus all -p 8000:8000 \
+  -v $(pwd)/models:/app/models \
+  -v $(pwd)/logs:/app/logs \
+  ghcr.io/smart-models/normalized-semantic-chunker:latest
+```
+
+The API will be available at `http://localhost:8000`. Access the interactive documentation at `http://localhost:8000/docs`.
 
 ### Getting the Code
 
@@ -187,7 +227,7 @@ cd Normalized-Semantic-Chunker
 
    Note: For GPU support, ensure you install the correct PyTorch version:
    ```bash
-   pip install --extra-index-url https://download.pytorch.org/whl/cu121 torch==2.1.1+cu121
+   pip install --extra-index-url https://download.pytorch.org/whl/cu126 torch==2.6.0+cu126
    ```
 
 3. Run the FastAPI server:
@@ -199,7 +239,9 @@ cd Normalized-Semantic-Chunker
    
    Access the API documentation and interactive testing interface at `http://localhost:8000/docs`.
 
-### Docker Deployment (Recommended)
+### Building Docker Image Locally
+
+If you prefer to build the Docker image locally or need to customize it:
 
 1. Create required directories for persistent storage:
    ```bash
@@ -245,9 +287,14 @@ cd Normalized-Semantic-Chunker
 
    > **Note**: The GPU-accelerated deployment requires an NVIDIA GPU with appropriate drivers installed. If you don't have an NVIDIA GPU, use the CPU-only deployment.
 
-3. The API will be available at `http://localhost:8000`.
-   
-   Access the API documentation and interactive testing interface at `http://localhost:8000/docs`.
+3. The API will be available at `http://localhost:8001` (docker-compose default port).
+
+   Access the API documentation and interactive testing interface at `http://localhost:8001/docs`.
+
+   > **Note**: You can change the port by setting the `APP_PORT` environment variable before running docker-compose:
+   > ```bash
+   > APP_PORT=8000 docker compose --profile gpu up -d
+   > ```
 
 ## Using the API
 
@@ -261,7 +308,9 @@ cd Normalized-Semantic-Chunker
   - `max_tokens`: Maximum token count per chunk (integer, required)
   - `model`: Embedding model to use for semantic analysis (string, default: `sentence-transformers/all-MiniLM-L6-v2`)
   - `merge_small_chunks`: Whether to merge undersized chunks (boolean, default: `true`)
+  - `merge_passes`: Maximum number of merge passes for undersized chunks (integer, default: `3`, range: 1-5). Higher values reduce small chunks but increase processing time. Only used when `merge_small_chunks` is `true`.
   - `verbosity`: Show detailed logs (boolean, default: `false`)
+  - `chunk_metadata_json`: Optional JSON string to merge into each output chunk. Useful for adding custom metadata like source document ID, category, or any other fields you need in your chunks (string, default: `null`)
   
   **Response:**
   Returns a JSON object containing:
@@ -287,22 +336,61 @@ cd Normalized-Semantic-Chunker
   ```
   The service will process each text chunk individually, maintaining the chunk boundaries provided in your JSON file, then apply semantic chunking within those boundaries as needed. Additional metadata fields beyond `text` are allowed and will be ignored during processing, so you can include any extra information you need while still having the JSON process correctly.
 
-- **GET `/`**  
-  Health check endpoint that returns service status, GPU availability, and API version.
+- **GET `/`**
+  Health check endpoint that returns service status, GPU availability, and API version. Always accessible, no authentication required.
+
+### Authentication
+
+The API supports optional Bearer Token authentication controlled by the `API_TOKEN` environment variable.
+
+- **Disabled (default)**: leave `API_TOKEN` unset or empty — all requests are accepted without any token.
+- **Enabled**: set `API_TOKEN` to a secret value — all `POST` requests must include the header:
+  ```
+  Authorization: Bearer <your-token>
+  ```
+  The `GET /` health check remains publicly accessible regardless.
+
+**Configuration:**
+```bash
+# Local (Linux/Mac)
+export API_TOKEN=your-secret-token
+
+# Local (Windows CMD)
+set API_TOKEN=your-secret-token
+
+# Docker: copy and edit docker/.env.example → docker/.env
+API_TOKEN=your-secret-token
+```
+
+**Error response when token is missing or invalid (HTTP 403):**
+```json
+{
+  "detail": "Invalid or missing API token"
+}
+```
 
 ### Example API Call using cURL
 
 ```bash
 # Basic usage with required parameters
 curl -X POST "http://localhost:8000/normalized_semantic_chunker/?max_tokens=512" \
-  -F "file=@document.txt" 
+  -F "file=@document.txt"
 
 # With all parameters specified
-curl -X POST "http://localhost:8000/normalized_semantic_chunker/?max_tokens=512&model=sentence-transformers/all-MiniLM-L6-v2&merge_small_chunks=true&verbosity=false" \
+curl -X POST "http://localhost:8000/normalized_semantic_chunker/?max_tokens=512&model=sentence-transformers/all-MiniLM-L6-v2&merge_small_chunks=true&merge_passes=3&verbosity=false" \
   -F "file=@document.txt" \
   -H "accept: application/json"
 
-# Health check endpoint
+# With custom metadata to include in each chunk
+curl -X POST 'http://localhost:8000/normalized_semantic_chunker/?max_tokens=512&chunk_metadata_json={"source_id":"doc123","category":"legal"}' \
+  -F "file=@document.txt"
+
+# With Bearer token authentication
+curl -X POST "http://localhost:8000/normalized_semantic_chunker/?max_tokens=512" \
+  -H "Authorization: Bearer your-secret-token" \
+  -F "file=@document.txt"
+
+# Health check endpoint (always public, no token needed)
 curl http://localhost:8000/
 ```
 
@@ -318,7 +406,10 @@ file_path = 'document.txt' # Your input text file
 max_tokens_per_chunk = 512
 # model_name = "sentence-transformers/all-MiniLM-L6-v2" # Optional: specify a different model
 merge_small_chunks = True  # Whether to merge undersized chunks with semantically similar neighbors
+merge_passes = 3  # Number of merge passes (1-5, higher = fewer small chunks but slower)
 verbosity = False  # Whether to show detailed logs
+# Optional: add custom metadata to each chunk
+chunk_metadata = {"source_id": "doc123", "category": "technical"}
 
 try:
     with open(file_path, 'rb') as f:
@@ -326,7 +417,9 @@ try:
         params = {
             'max_tokens': max_tokens_per_chunk,
             'merge_small_chunks': merge_small_chunks,
-            'verbosity': verbosity
+            'merge_passes': merge_passes,
+            'verbosity': verbosity,
+            # 'chunk_metadata_json': json.dumps(chunk_metadata)  # Uncomment to add metadata
         }
         # if model_name: # Uncomment to specify a model
         #     params['model'] = model_name
@@ -389,6 +482,23 @@ A successful chunking operation returns a `ChunkingResult` object:
     "source": "your-document-source.txt",
     "processing_time": 15.78
   }
+}
+```
+
+**With custom metadata** (when using `chunk_metadata_json` parameter):
+
+```json
+{
+  "chunks": [
+    {
+      "text": "This is the first chunk of text...",
+      "token_count": 480,
+      "id": 1,
+      "source_id": "doc123",
+      "category": "legal"
+    }
+  ],
+  "metadata": { ... }
 }
 ```
 

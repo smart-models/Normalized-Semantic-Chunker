@@ -18,7 +18,9 @@ To use this service, you need to send it a request containing:
 *   **Maximum Tokens:** You need to tell the code the maximum number of tokens (words/word pieces) allowed in each chunk. This is a required number and must be greater than zero.
 *   **(Optional) Model Name:** The code uses a specific AI model (called an "embedding model") to understand the meaning of sentences. By default, it uses one called `"sentence-transformers/all-MiniLM-L6-v2"`, but you can optionally specify a different compatible model name if needed.
 *   **(Optional) Merge Small Chunks:** You can specify whether to merge undersized chunks with semantically similar neighbors (default: `true`).
+*   **(Optional) Merge Passes:** When merging small chunks is enabled, you can control how many passes the algorithm makes to merge undersized chunks. Higher values (1-5) result in fewer small chunks but increase processing time (default: `3`).
 *   **(Optional) Verbosity:** You can specify whether to show detailed logs during processing (default: `false`).
+*   **(Optional) Chunk Metadata JSON:** You can provide a JSON string containing custom metadata fields that will be merged into each output chunk. This is useful for adding source document IDs, categories, or any other fields you need to track (default: `null`).
 
 **JSON Input Format:**
 If you are using a JSON file as input, it must follow this structure:
@@ -46,6 +48,7 @@ When the code successfully processes your file, it sends back a result containin
     *   `text`: The actual text content of the chunk.
     *   `token_count`: How many tokens are in this specific chunk.
     *   `id`: A simple number (1, 2, 3...) to identify the chunk's order.
+    *   Any **custom metadata fields** you provided via the `chunk_metadata_json` parameter (e.g., `source_id`, `category`, etc.).
 *   **Metadata:** This provides summary information about the chunking process:
     *   `n_chunks`: The total number of chunks created.
     *   `avg_tokens`: The average number of tokens per chunk.
@@ -70,9 +73,9 @@ The code follows a multi-step process to create these smart chunks:
     *   Crucially, while doing this, it constantly checks if the chunks being formed are likely to stay *below* the `max_tokens` limit you provided (using a statistical estimate).
     *   It searches for the best percentile cutoff that balances meaningful splits and the size limit. It uses multiple CPU cores (`ProcessPoolExecutor`) to test different percentiles simultaneously to find the best one faster.
     *   This step produces an initial set of chunks, each with its text and token count.
-*   **Step 5: Merging Small Chunks:** Sometimes, the initial chunking might create very small, possibly less useful chunks. This step (`merge_undersized_chunks`) identifies chunks that are significantly smaller than average (below the 5th percentile size). It then tries to merge such a small chunk with its adjacent neighbor (previous or next) *if* they are semantically similar (using the meaning vectors again) *and* the merged chunk doesn't exceed the `max_tokens` limit.
+*   **Step 5: Merging Small Chunks:** Sometimes, the initial chunking might create very small, possibly less useful chunks. This step (`merge_undersized_chunks`) identifies chunks that are significantly smaller than average (below the 5th percentile size). It then tries to merge such a small chunk with its adjacent neighbor (previous or next) *if* they are semantically similar (using the meaning vectors again) *and* the merged chunk doesn't exceed the `max_tokens` limit. This process runs in multiple passes (configurable via `merge_passes`) to maximize the number of small chunks that get merged.
 *   **Step 6: Splitting Large Chunks:** After merging, some chunks might still be larger than the allowed `max_tokens`. This step (`split_oversized_chunk`) finds these oversized chunks and splits them further. It tries to split them along sentence boundaries first, aiming for reasonably sized sub-chunks. If a single sentence itself is too large, it will split that sentence based purely on the token limit.
-*   **Step 7: Formatting Output:** Finally, it takes the finalized list of chunks (after merging and splitting), calculates the summary metadata, assigns IDs to the chunks, and formats everything into the `ChunkingResult` structure to be sent back to the user.
+*   **Step 7: Formatting Output:** Finally, it takes the finalized list of chunks (after merging and splitting), calculates the summary metadata, assigns IDs to the chunks, merges any custom metadata provided via `chunk_metadata_json`, and formats everything into the `ChunkingResult` structure to be sent back to the user.
 
 **5. Important Logic Flows or Data Transformations**
 

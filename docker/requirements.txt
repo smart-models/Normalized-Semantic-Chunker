@@ -1,10 +1,16 @@
-fastapi>=0.109.0
-uvicorn[standard]>=0.30.0
-sentence-transformers>=4.1.0
-tiktoken>=0.5.2
-numpy<2.0.0,>=1.24.0
-pydantic>=2.5.0
-python-multipart>=0.0.6 
+# PyTorch CUDA index
 --extra-index-url https://download.pytorch.org/whl/cu126
-torch==2.6.0+cu126
+
+# Core dependencies
+requests>=2.31.0
+fastapi>=0.124.0
+uvicorn[standard]>=0.30.0
+sentence-transformers>=5.2.0
+tiktoken>=0.5.2
+pydantic>=2.5.0
+python-multipart>=0.0.6
 psutil>=5.9.5
+
+# PyTorch ecosystem (CUDA 12.6)
+torch==2.6.0+cu126
+numpy>=1.24.0,<2.0.0

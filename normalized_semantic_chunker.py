@@ -1,4 +1,5 @@
 import os
+import hmac
 import time
 import json
 import logging
@@ -6,13 +7,15 @@ import re
 import psutil
 import tiktoken
 import torch
+import threading
 import multiprocessing
 import numpy as np
 from logging.handlers import RotatingFileHandler
 from sentence_transformers import SentenceTransformer
-from typing import List, Optional, Dict, Union
+from typing import List, Optional, Dict, Union, Any
 from fastapi import FastAPI, File, UploadFile, HTTPException, Depends, BackgroundTasks
-from pydantic import BaseModel, Field
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from pydantic import BaseModel, Field, ConfigDict
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from contextlib import asynccontextmanager
@@ -47,13 +50,11 @@ ALLOWED_EXTENSIONS = {"txt", "md", "json"}
 EMBEDDER_MODEL = os.environ.get(
     "EMBEDDER_MODEL", "sentence-transformers/all-MiniLM-L6-v2"
 )
-MAX_FILE_SIZE = int(
-    os.environ.get("MAX_FILE_SIZE", 10 * 1024 * 1024)
-)  # 10MB di default
-MAX_WORKERS = int(
-    os.environ.get("MAX_WORKERS", min(multiprocessing.cpu_count() - 1, 4))
+MAX_FILE_SIZE = int(os.environ.get("MAX_FILE_SIZE", 10 * 1024 * 1024))  # 10MB default
+MAX_WORKERS = max(
+    1, int(os.environ.get("MAX_WORKERS", min(multiprocessing.cpu_count() - 1, 4)))
 )
-CACHE_TIMEOUT = int(os.environ.get("CACHE_TIMEOUT", 3600))  # 1 ora in secondi
+CACHE_TIMEOUT = int(os.environ.get("CACHE_TIMEOUT", 3600))  # 1 hour in seconds
 
 
 @asynccontextmanager
@@ -90,9 +91,22 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Normalized Semantic Chunker",
     description="API for processing and chunking text documents into smaller, semantically coherent segments",
-    version="0.7.2",
+    version="1.0.0",
     lifespan=lifespan,
 )
+
+API_TOKEN = os.environ.get("API_TOKEN", "").strip()
+_security = HTTPBearer(auto_error=False)
+
+
+async def verify_token(
+    credentials: HTTPAuthorizationCredentials = Depends(_security),
+):
+    """Verify Bearer token if API_TOKEN is configured. No-op when API_TOKEN is unset."""
+    if not API_TOKEN:
+        return  # Auth disabled
+    if credentials is None or not hmac.compare_digest(credentials.credentials, API_TOKEN):
+        raise HTTPException(status_code=403, detail="Invalid or missing API token")
 
 # Create logs directory if it doesn't exist
 logs_dir = Path("logs")
@@ -128,26 +142,11 @@ file_handler.setFormatter(formatter)
 logger.addHandler(file_handler)
 
 
-# Function to log messages based on verbosity setting
-def log_message(message, is_step=False, is_summary=False, verbosity=True):
-    """
-    Log messages with verbosity control.
-
-    Args:
-        message: The message to log
-        is_step: Whether this is a step message (always shown regardless of verbosity)
-        is_summary: Whether this is a summary message (always shown regardless of verbosity)
-        verbosity: Current verbosity setting from the API request
-    """
-    # Always log step and summary messages
-    if is_step or is_summary or verbosity:
-        logger.info(message)
-
-
 # Create a singleton for model caching with expiration
 _model_cache = {}
 _model_last_used = {}
-_model_lock = multiprocessing.RLock()  # Thread-safe lock for model cache
+_model_lock = multiprocessing.RLock()  # Process-safe lock for model cache
+_encoding_lock = threading.Lock()  # Thread-safe lock for model encoding (GPU/CPU moves)
 
 
 def _get_model(model_name: str) -> SentenceTransformer:
@@ -270,8 +269,8 @@ def split_into_sentences(doc: str) -> List[str]:
 def get_embeddings(
     doc: List[str],
     model: str = EMBEDDER_MODEL,
-    batch_size: int = 8,  # Aumentato da 4 a 8 per migliorare la performance
-    verbosity: bool = False,  # Cambiato a False di default
+    batch_size: int = 8,  # Increased from 4 to 8 for better performance
+    verbosity: bool = False,  # Changed to False by default
     convert_to_numpy: bool = True,
     normalize_embeddings: bool = True,
 ) -> dict[str, List[float]]:
@@ -306,29 +305,32 @@ def get_embeddings(
                     f"Large document detected, reducing batch size to {batch_size}"
                 )
 
-        # Move to GPU if available
-        if torch.cuda.is_available():
-            model_instance = model_instance.to(device)
+        # Use lock to prevent race conditions when moving model between devices
+        with _encoding_lock:
+            # Move to GPU if available
+            if torch.cuda.is_available():
+                model_instance = model_instance.to(device)
 
-        # Get embeddings
-        embeddings = model_instance.encode(
-            doc,
-            batch_size=batch_size,
-            show_progress_bar=verbosity,
-            convert_to_numpy=convert_to_numpy,
-            normalize_embeddings=normalize_embeddings,
-        )
+            # Get embeddings
+            embeddings = model_instance.encode(
+                doc,
+                batch_size=batch_size,
+                show_progress_bar=verbosity,
+                convert_to_numpy=convert_to_numpy,
+                normalize_embeddings=normalize_embeddings,
+            )
 
-        # Create dictionary mapping sentences to embeddings
-        result = {
-            sentence: embedding.tolist() for sentence, embedding in zip(doc, embeddings)
-        }
+            # Create dictionary mapping sentences to embeddings
+            result = {
+                sentence: embedding.tolist()
+                for sentence, embedding in zip(doc, embeddings)
+            }
 
-        # Cleanup GPU memory but keep model in RAM
-        if torch.cuda.is_available():
-            model_instance.cpu()
-            del embeddings
-            torch.cuda.empty_cache()
+            # Cleanup GPU memory but keep model in RAM
+            if torch.cuda.is_available():
+                model_instance.cpu()
+                del embeddings
+                torch.cuda.empty_cache()
 
         return result
 
@@ -589,7 +591,7 @@ def _find_optimal_chunks(
         Uses a statistical approach by calculating the estimated 95th percentile
         of token counts to ensure most chunks stay below the token limit.
     """
-    # Usa un intervallo di percentili più mirato per un'esplorazione più efficiente
+    # Use a targeted percentile range for more efficient exploration
     percentile_steps = 5
     for percentile in range(95, 0, -percentile_steps):
         chunks_with_tokens, max_token_val, average_tokens, std_dev = (
@@ -816,160 +818,174 @@ def merge_undersized_chunks(
     max_tokens: int,
     model: str = EMBEDDER_MODEL,
     verbosity: bool = False,
+    max_passes: int = 3,
 ) -> List[dict]:
     """
     Merge chunks that are below a minimum token threshold with semantically similar neighbors.
+    Uses multiple passes to maximize the number of small chunks that get merged.
 
     Args:
         chunks (List[dict]): List of chunks with 'text' and 'token_count' keys
-        min_token_threshold (float): Minimum token threshold (e.g., 5th percentile)
+        min_token_threshold (float): Minimum token threshold (e.g., 5th percentile).
+            This threshold remains FIXED across all passes to ensure convergence.
         max_tokens (int): Maximum allowed tokens for a chunk
         model (str): Embedding model to use
         verbosity (bool): If True, shows all log messages and progress bars
+        max_passes (int): Maximum number of merge passes (default: 3, range: 1-5)
 
     Returns:
         List[dict]: Updated list of chunks after merging small ones
     """
-    # Step 1: Identify undersized chunks
-    undersized_indices = [
-        i
-        for i, chunk in enumerate(chunks)
-        if chunk["token_count"] < min_token_threshold
-    ]
-
-    if not undersized_indices:
-        return chunks  # No small chunks to merge
-
-    total_undersized = len(undersized_indices)
-
-    # If most chunks are undersized, adjust the threshold
-    if total_undersized > len(chunks) * 0.5:
-        logger.info("Too many undersized chunks, adjusting threshold")
-        min_token_threshold = min_token_threshold * 0.8
-        undersized_indices = [
-            i
-            for i, chunk in enumerate(chunks)
-            if chunk["token_count"] < min_token_threshold
-        ]
-        total_undersized = len(undersized_indices)
-
-    # Step 2: Sort undersized chunks by token count (ascending) to process smallest first
-    undersized_indices.sort(key=lambda i: chunks[i]["token_count"])
-
-    # Step 3: Calculate initial embeddings for all chunks
-    # We process all chunks in a single batch for efficiency
-    chunk_texts = [chunk["text"] for chunk in chunks]
-
-    # Get embeddings for all chunks in parallel using batch processing
-    embeddings_dict = get_embeddings(
-        doc=chunk_texts,
-        model=model,
-        batch_size=8,  # Process 8 chunks at a time for optimal performance
-        verbosity=verbosity,
-        convert_to_numpy=True,
-        normalize_embeddings=True,  # Normalized for cosine similarity
+    # Track initial state for final logging
+    initial_undersized = sum(
+        1 for chunk in chunks if chunk["token_count"] < min_token_threshold
     )
 
-    # Convert to numpy array while preserving the original chunk order
-    embeddings = np.array([embeddings_dict[text] for text in chunk_texts])
+    if initial_undersized == 0:
+        return chunks  # No small chunks to merge
 
-    # Step 4: Initialize data structures for processing
-    result_chunks = list(chunks)  # Working copy of chunks that will be modified
-    merged_indices = set()  # Tracks indices of chunks that have been merged into others
-
-    # Step 5: Process undersized chunks to find best merge candidates
-    # We'll track which chunks need their embeddings updated after merging
-    indices_to_update = []  # Stores indices of chunks that were merged
-    texts_to_update = []  # Stores new text content for merged chunks
-
-    for idx in undersized_indices:
-        if idx in merged_indices:
-            continue  # Skip if this chunk has already been merged
-
-        current_chunk = result_chunks[idx]
-        candidates = []
-
-        # Check previous chunk if available
-        if idx > 0 and idx - 1 not in merged_indices:
-            prev_chunk = result_chunks[idx - 1]
-            combined_tokens = current_chunk["token_count"] + prev_chunk["token_count"]
-
-            if combined_tokens <= max_tokens:
-                # Calculate cosine similarity using dot product (vectors are already normalized)
-                similarity = float(np.dot(embeddings[idx], embeddings[idx - 1]))
-                candidates.append((idx - 1, similarity, combined_tokens))
-
-        # Check next chunk if available
-        if idx < len(result_chunks) - 1 and idx + 1 not in merged_indices:
-            next_chunk = result_chunks[idx + 1]
-            combined_tokens = current_chunk["token_count"] + next_chunk["token_count"]
-
-            if combined_tokens <= max_tokens:
-                # Calculate cosine similarity
-                similarity = float(np.dot(embeddings[idx], embeddings[idx + 1]))
-                candidates.append((idx + 1, similarity, combined_tokens))
-
-        # If no valid candidates, continue to next chunk
-        if not candidates:
-            continue
-
-        # Find best candidate based on similarity
-        best_candidate = max(candidates, key=lambda x: x[1])
-        merge_idx, similarity, combined_tokens = best_candidate
-
-        # Determine merge order (maintain document order)
-        if merge_idx < idx:
-            merged_text = result_chunks[merge_idx]["text"] + " " + current_chunk["text"]
-            target_idx = merge_idx
-            removed_idx = idx
-        else:
-            merged_text = current_chunk["text"] + " " + result_chunks[merge_idx]["text"]
-            target_idx = idx
-            removed_idx = merge_idx
-
-        # Update chunk at target index
-        result_chunks[target_idx] = {
-            "text": merged_text,
-            "token_count": combined_tokens,
-        }
-
-        # Mark the other chunk as None (to be filtered later)
-        result_chunks[removed_idx] = None
-
-        # Mark the removed chunk as merged to prevent future merges with it
-        merged_indices.add(removed_idx)
-
-        # Track this merge for batch embedding update
-        indices_to_update.append(target_idx)  # The index that was updated
-        texts_to_update.append(merged_text)  # The new combined text
-
-    # Step 6: Update embeddings for all merged chunks in a single batch
-    # This is more efficient than updating embeddings one at a time
-    if texts_to_update:
-        # Get new embeddings for all merged chunks in parallel
-        new_embeddings_dict = get_embeddings(
-            doc=texts_to_update,
-            model=model,
-            batch_size=8,  # Process up to 8 chunks at once
-            verbosity=verbosity,
-            convert_to_numpy=True,
-            normalize_embeddings=True,  # Maintains cosine similarity compatibility
+    # If most chunks are undersized, adjust the threshold (only once, before passes)
+    adjusted_threshold = min_token_threshold
+    if initial_undersized > len(chunks) * 0.5:
+        logger.info("Too many undersized chunks, adjusting threshold to 80%")
+        adjusted_threshold = min_token_threshold * 0.8
+        initial_undersized = sum(
+            1 for chunk in chunks if chunk["token_count"] < adjusted_threshold
         )
 
-        # Update the embeddings array with new values for merged chunks
-        for i, text in zip(indices_to_update, texts_to_update):
-            embeddings[i] = new_embeddings_dict[text]
+    # Working copy of chunks that will be modified across passes
+    current_chunks = list(chunks)
+    total_merged = 0
 
-    # Filter out None values (merged chunks)
-    final_chunks = [chunk for chunk in result_chunks if chunk is not None]
+    # Multi-pass merge loop
+    for pass_num in range(1, max_passes + 1):
+        # Identify undersized chunks for this pass (using fixed threshold)
+        undersized_indices = [
+            i
+            for i, chunk in enumerate(current_chunks)
+            if chunk["token_count"] < adjusted_threshold
+        ]
 
-    # Report merging statistics
+        if not undersized_indices:
+            if verbosity:
+                logger.info(
+                    f"Pass {pass_num}: No undersized chunks remaining, stopping early"
+                )
+            break
+
+        # Sort by token count (ascending) to process smallest first
+        undersized_indices.sort(key=lambda i: current_chunks[i]["token_count"])
+
+        # Calculate embeddings for all current chunks
+        chunk_texts = [chunk["text"] for chunk in current_chunks]
+        embeddings_dict = get_embeddings(
+            doc=chunk_texts,
+            model=model,
+            batch_size=8,
+            verbosity=False,  # Suppress per-pass embedding logs
+            convert_to_numpy=True,
+            normalize_embeddings=True,
+        )
+        embeddings = np.array([embeddings_dict[text] for text in chunk_texts])
+
+        # Track merges for this pass
+        merged_indices = set()
+        merged_count = 0
+
+        for idx in undersized_indices:
+            if idx in merged_indices:
+                continue
+
+            current_chunk = current_chunks[idx]
+            if current_chunk is None:
+                continue
+
+            candidates = []
+
+            # Check previous chunk
+            if idx > 0 and idx - 1 not in merged_indices:
+                prev_chunk = current_chunks[idx - 1]
+                if prev_chunk is not None:
+                    combined_tokens = (
+                        current_chunk["token_count"] + prev_chunk["token_count"]
+                    )
+                    if combined_tokens <= max_tokens:
+                        similarity = float(np.dot(embeddings[idx], embeddings[idx - 1]))
+                        candidates.append((idx - 1, similarity, combined_tokens))
+
+            # Check next chunk
+            if idx < len(current_chunks) - 1 and idx + 1 not in merged_indices:
+                next_chunk = current_chunks[idx + 1]
+                if next_chunk is not None:
+                    combined_tokens = (
+                        current_chunk["token_count"] + next_chunk["token_count"]
+                    )
+                    if combined_tokens <= max_tokens:
+                        similarity = float(np.dot(embeddings[idx], embeddings[idx + 1]))
+                        candidates.append((idx + 1, similarity, combined_tokens))
+
+            if not candidates:
+                continue
+
+            # Select best candidate by similarity
+            best_candidate = max(candidates, key=lambda x: x[1])
+            merge_idx, similarity, combined_tokens = best_candidate
+
+            # Merge maintaining document order
+            if merge_idx < idx:
+                merged_text = (
+                    current_chunks[merge_idx]["text"] + " " + current_chunk["text"]
+                )
+                target_idx = merge_idx
+                removed_idx = idx
+            else:
+                merged_text = (
+                    current_chunk["text"] + " " + current_chunks[merge_idx]["text"]
+                )
+                target_idx = idx
+                removed_idx = merge_idx
+
+            current_chunks[target_idx] = {
+                "text": merged_text,
+                "token_count": combined_tokens,
+            }
+            current_chunks[removed_idx] = None
+            merged_indices.add(removed_idx)
+            merged_count += 1
+
+        # Compact the list (remove None values) for next pass
+        current_chunks = [chunk for chunk in current_chunks if chunk is not None]
+        total_merged += merged_count
+
+        if verbosity:
+            remaining = sum(
+                1
+                for chunk in current_chunks
+                if chunk["token_count"] < adjusted_threshold
+            )
+            logger.info(
+                f"Pass {pass_num}/{max_passes}: {len(undersized_indices)} undersized, "
+                f"{merged_count} merged, {remaining} remaining"
+            )
+
+        # Stop if no merges were possible in this pass
+        if merged_count == 0:
+            if verbosity:
+                logger.info(f"Pass {pass_num}: No merges possible, stopping early")
+            break
+
+    # Final statistics
+    final_undersized = sum(
+        1 for chunk in current_chunks if chunk["token_count"] < adjusted_threshold
+    )
+
     if verbosity:
         logger.info(
-            f"After merging: {len(chunks)} → {len(final_chunks)} chunks ({len(chunks) - len(final_chunks)} merged), {total_undersized} originally undersized"
+            f"Merge completed: {len(chunks)} → {len(current_chunks)} chunks "
+            f"({total_merged} merged), undersized: {initial_undersized} → {final_undersized}"
         )
 
-    return final_chunks
+    return current_chunks
 
 
 def _split_large_sentence(
@@ -1151,7 +1167,7 @@ def parse_json_content(content: bytes) -> List[str]:
         if not chunks:
             raise ValueError("No valid text chunks found in JSON")
 
-        # Il log dettagliato verrà gestito dalla funzione chiamante in base all'impostazione di verbosità
+        # Detailed logging is handled by the caller based on verbosity setting
         return chunks
 
     except json.JSONDecodeError as e:
@@ -1160,6 +1176,23 @@ def parse_json_content(content: bytes) -> List[str]:
     except Exception as e:
         logger.error(f"Error parsing JSON: {str(e)}")
         raise ValueError(f"Error parsing JSON: {str(e)}")
+
+
+def parse_chunk_metadata(metadata_json: Optional[str]) -> Optional[Any]:
+    """Parse and validate the chunk_metadata_json parameter."""
+    if metadata_json is None:
+        return None
+
+    if not metadata_json.strip():
+        return None
+
+    try:
+        return json.loads(metadata_json)
+    except json.JSONDecodeError as e:
+        logger.error(f"Invalid chunk_metadata_json: {str(e)}")
+        raise HTTPException(
+            status_code=400, detail=f"Invalid chunk_metadata_json: {str(e)}"
+        )
 
 
 def validate_file_size(content_length: int) -> None:
@@ -1190,9 +1223,19 @@ class ChunkingInput(BaseModel):
         default=True,
         description="Whether to merge undersized chunks for more balanced output",
     )
+    merge_passes: int = Field(
+        default=3,
+        ge=1,
+        le=5,
+        description="Maximum number of merge passes for undersized chunks (higher = fewer small chunks, but slower). Only used when merge_small_chunks is True.",
+    )
     verbosity: bool = Field(
         default=False,
         description="If True, shows all log messages. If False, only shows step headers and final statistics.",
+    )
+    chunk_metadata_json: Optional[str] = Field(
+        default=None,
+        description="Optional JSON string to merge into each output chunk.",
     )
 
 
@@ -1208,6 +1251,7 @@ class ChunkingMetadata(BaseModel):
 
 
 class Chunk(BaseModel):
+    model_config = ConfigDict(extra="allow")
     text: str
     token_count: int
     id: int
@@ -1241,6 +1285,7 @@ async def Normalized_Semantic_Chunker(
     file: UploadFile = File(...),
     input_data: ChunkingInput = Depends(),
     background_tasks: BackgroundTasks = None,
+    _auth=Depends(verify_token),
 ):
     """
     Process and chunk a text document into smaller, semantically coherent segments using advanced NLP techniques.
@@ -1287,6 +1332,7 @@ async def Normalized_Semantic_Chunker(
     start_time = time.time()
 
     try:
+        parsed_metadata = parse_chunk_metadata(input_data.chunk_metadata_json)
         # Validate file extension
         validate_file_extension(file.filename)
 
@@ -1338,9 +1384,7 @@ async def Normalized_Semantic_Chunker(
                 )
             except Exception as e:
                 # Catch any other unexpected errors
-                logger.error(
-                    f"Unexpected error during sentence splitting (method: {'newline' if input_data.use_newline_splitting else 'regex'}): {str(e)}"
-                )
+                logger.error(f"Unexpected error during sentence splitting: {str(e)}")
                 raise HTTPException(
                     status_code=500,
                     detail=f"Unexpected error during sentence splitting: {str(e)}",
@@ -1373,13 +1417,16 @@ async def Normalized_Semantic_Chunker(
             verbosity=input_data.verbosity,
         )
 
-        # Check if valid percentile was found, otherwise raise exception
-        if not percentile:
-            logger.warning("No valid percentile found for chunking")
+        # Check if chunking produced valid results
+        # Note: percentile=0 is a valid fallback (single chunk), so we check chunks instead
+        if not chunks_with_tokens:
+            logger.warning("No valid chunks produced")
             raise HTTPException(
                 status_code=400,
-                detail="No valid percentile found for chunking. Try increasing max_tokens parameter.",
+                detail="No valid chunks produced. Try increasing max_tokens parameter.",
             )
+        if percentile == 0:
+            logger.warning("Using fallback single-chunk mode (percentile=0)")
 
         # Dict text->token_count
         final_chunks = []
@@ -1410,7 +1457,7 @@ async def Normalized_Semantic_Chunker(
         # STEP 5: Add to log
         logger.info("Step 5 - Distribution Statistics Calculation")
 
-        # Statistiche dettagliate mostrate solo in modalità verbosa
+        # Detailed statistics shown only in verbose mode
         if input_data.verbosity:
             logger.info(f"Mean tokens: {mean_tokens:.2f}")
             logger.info(f"Total chunks: {total_chunks}")
@@ -1430,13 +1477,16 @@ async def Normalized_Semantic_Chunker(
         if input_data.merge_small_chunks and chunks_under_5th > 0:
             logger.info("Step 6 - Merge Undersized Chunks")
             if input_data.verbosity:
-                logger.info("Merge process for chunks under 5th percentile")
+                logger.info(
+                    f"Merge process for chunks under 5th percentile (threshold: {percentile_5th:.2f} tokens)"
+                )
             final_chunks = merge_undersized_chunks(
                 chunks=final_chunks,
                 min_token_threshold=percentile_5th,
                 max_tokens=input_data.max_tokens // 2,
                 model=input_data.model,
                 verbosity=input_data.verbosity,
+                max_passes=input_data.merge_passes,
             )
 
         # STEP 7: Split oversized chunks
@@ -1449,7 +1499,9 @@ async def Normalized_Semantic_Chunker(
 
         if oversized_indices:
             if input_data.verbosity:
-                logger.info("Starting split process for oversized chunks")
+                logger.info(
+                    f"Starting split process for oversized chunks (95th percentile: {percentile_95th:.2f} tokens)"
+                )
                 logger.info(
                     f"Found {len(oversized_indices)} chunks over threshold of {input_data.max_tokens} tokens"
                 )
@@ -1484,18 +1536,43 @@ async def Normalized_Semantic_Chunker(
 
         logger.info("Step 8 - Semantic Chunking Statistics after processing")
 
-        # Statistiche finali mostrate sempre, indipendentemente dalla verbosity
+        # Final statistics always shown regardless of verbosity
         logger.info(f"Mean tokens: {mean_tokens_after_split:.2f}")
         logger.info(f"Total chunks: {len(final_chunks)}")
         logger.info(f"Smallest chunk: {min(token_counts_after_split)} tokens")
         logger.info(f"Largest chunk: {max_tokens_after_split} tokens")
 
+        metadata_payload = None
+        # Check if metadata was explicitly provided (even if JSON null)
+        has_explicit_metadata = (
+            input_data.chunk_metadata_json is not None
+            and input_data.chunk_metadata_json.strip()
+        )
+        if has_explicit_metadata:
+            if isinstance(parsed_metadata, dict):
+                metadata_payload = {
+                    key: value
+                    for key, value in parsed_metadata.items()
+                    if key not in {"text", "token_count", "id"}
+                }
+            else:
+                # Wrap non-dict values (including None from JSON null) in chunk_metadata
+                metadata_payload = {"chunk_metadata": parsed_metadata}
+
+        chunk_items = []
+        for i, chunk in enumerate(final_chunks):
+            chunk_payload = {
+                "text": chunk["text"],
+                "token_count": chunk["token_count"],
+                "id": i + 1,
+            }
+            if metadata_payload:
+                chunk_payload.update(metadata_payload)
+            chunk_items.append(Chunk(**chunk_payload))
+
         processing_time = time.time() - start_time
         result = ChunkingResult(
-            chunks=[
-                Chunk(text=chunk["text"], token_count=chunk["token_count"], id=i + 1)
-                for i, chunk in enumerate(final_chunks)
-            ],
+            chunks=chunk_items,
             metadata=ChunkingMetadata(
                 n_chunks=len(final_chunks),
                 avg_tokens=float(

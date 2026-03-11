@@ -83,3 +83,6 @@ yarn-error.log*
 # Local configuration
 config.local.yaml
 .env.local
+
+# Claude Code
+.claude/
