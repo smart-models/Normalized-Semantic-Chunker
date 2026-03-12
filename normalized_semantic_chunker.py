@@ -503,15 +503,13 @@ def _count_tokens_for_text(args: tuple[str, str]) -> int:
 
     Returns:
         int: Number of tokens in the text
+
+    Raises:
+        Exception: If tiktoken fails. Caller (ProcessPoolExecutor) handles the exception.
     """
     text, encoding_name = args
-    try:
-        encoding = tiktoken.get_encoding(encoding_name)
-        return len(encoding.encode(text))
-    except Exception as e:
-        logger.error(f"Error counting tokens: {str(e)}")
-        # Fallback to approximate count if tiktoken fails
-        return len(text.split())
+    encoding = tiktoken.get_encoding(encoding_name)
+    return len(encoding.encode(text))
 
 
 def _group_chunks_by_similarity(
@@ -1060,33 +1058,20 @@ def _split_large_sentence(
 
     Returns:
         List of dictionaries containing text and token_count
+
+    Raises:
+        Exception: If tiktoken fails to encode/decode the sentence.
     """
-    try:
-        encoding = tiktoken.get_encoding("cl100k_base")
-        all_tokens = encoding.encode(sentence)
+    encoding = tiktoken.get_encoding("cl100k_base")
+    all_tokens = encoding.encode(sentence)
 
-        chunks = []
-        for i in range(0, len(all_tokens), max_tokens):
-            chunk_tokens = all_tokens[i : min(i + max_tokens, len(all_tokens))]
-            chunk_text = encoding.decode(chunk_tokens)
-            chunks.append({"text": chunk_text, "token_count": len(chunk_tokens)})
+    chunks = []
+    for i in range(0, len(all_tokens), max_tokens):
+        chunk_tokens = all_tokens[i : min(i + max_tokens, len(all_tokens))]
+        chunk_text = encoding.decode(chunk_tokens)
+        chunks.append({"text": chunk_text, "token_count": len(chunk_tokens)})
 
-        return chunks
-    except Exception as e:
-        logger.error(f"Error splitting large sentence: {str(e)}")
-        # Fallback to a simple character-based split
-        total_chars = len(sentence)
-        avg_chars_per_token = 4  # Rough estimate
-        chars_per_chunk = max_tokens * avg_chars_per_token
-
-        chunks = []
-        for i in range(0, total_chars, chars_per_chunk):
-            chunk_text = sentence[i : min(i + chars_per_chunk, total_chars)]
-            # Estimate token count
-            token_count = len(chunk_text) // avg_chars_per_token
-            chunks.append({"text": chunk_text, "token_count": token_count})
-
-        return chunks
+    return chunks
 
 
 def split_oversized_chunk(
