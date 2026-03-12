@@ -297,6 +297,15 @@ If you prefer to build the Docker image locally or need to customize it:
    > ```bash
    > APP_PORT=8000 docker compose --profile gpu up -d
    > ```
+   
+4. Optional: customize Docker environment variables:
+   ```bash
+   # From the docker directory
+   cp .env.example .env
+   ```
+   The Docker Compose file forwards the application environment variables in `docker/.env` to the container, including:
+   `API_TOKEN`, `EMBEDDER_MODEL`, `MAX_FILE_SIZE`, `MAX_CHUNK_TEXT_SIZE`, `MAX_WORKERS`, `WORKER_TIMEOUT`, and `CACHE_TIMEOUT`.
+   You can also use Docker-specific variables such as `APP_PORT`, `MODELS_PATH`, and `LOGS_PATH`.
 
 ## Using the API
 
@@ -379,7 +388,7 @@ API_TOKEN=your-secret-token
 
 ### Environment Variables
 
-The service behaviour can be tuned via environment variables (set in `docker/.env` or exported before running):
+The service behaviour can be tuned via environment variables (set in `docker/.env` for Docker Compose deployments, or exported before running locally):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -391,7 +400,19 @@ The service behaviour can be tuned via environment variables (set in `docker/.en
 | `CACHE_TIMEOUT` | `3600` | Seconds before an unused model is evicted from the in-memory cache. |
 | `EMBEDDER_MODEL` | `sentence-transformers/all-MiniLM-L6-v2` | Default embedding model loaded at startup. |
 
-Copy `docker/.env.example` to `docker/.env` and uncomment the variables you want to override.
+When using Docker Compose, these application variables are forwarded from `docker/.env` into the container.
+
+### Docker Compose Variables
+
+The Docker Compose deployment also supports a few Docker-specific variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `APP_PORT` | `8001` | Host port mapped to the container's internal port `8000`. |
+| `MODELS_PATH` | `../models` | Host path bind-mounted to `/app/models` for persistent model storage. |
+| `LOGS_PATH` | `../logs` | Host path bind-mounted to `/app/logs` for persistent log storage. |
+
+Copy `docker/.env.example` to `docker/.env` and set the variables you want to override.
 
 ### Input Constraints
 

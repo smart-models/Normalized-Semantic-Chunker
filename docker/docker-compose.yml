@@ -20,8 +20,15 @@ services:
       # Authentication
       - API_TOKEN=${API_TOKEN:-}
 
+      # Application Configuration
+      - EMBEDDER_MODEL=${EMBEDDER_MODEL:-sentence-transformers/all-MiniLM-L6-v2}
+      - MAX_FILE_SIZE=${MAX_FILE_SIZE:-10485760}
+      - MAX_CHUNK_TEXT_SIZE=${MAX_CHUNK_TEXT_SIZE:-100000}
+      - MAX_WORKERS=${MAX_WORKERS:-}
+      - WORKER_TIMEOUT=${WORKER_TIMEOUT:-300}
+      - CACHE_TIMEOUT=${CACHE_TIMEOUT:-3600}
+
       # Cache and Threading Optimizations
-      - MODEL_CACHE_TIMEOUT=${MODEL_CACHE_TIMEOUT:-3600}
       - OMP_NUM_THREADS=${OMP_NUM_THREADS:-4}
       - MKL_NUM_THREADS=${MKL_NUM_THREADS:-4}
       
