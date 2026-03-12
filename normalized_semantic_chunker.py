@@ -55,6 +55,7 @@ MAX_WORKERS = max(
     1, int(os.environ.get("MAX_WORKERS", min(multiprocessing.cpu_count() - 1, 4)))
 )
 CACHE_TIMEOUT = int(os.environ.get("CACHE_TIMEOUT", 3600))  # 1 hour in seconds
+WORKER_TIMEOUT = int(os.environ.get("WORKER_TIMEOUT", 300))  # 5 minutes default
 
 
 @asynccontextmanager
@@ -787,16 +788,22 @@ def parallel_find_optimal_chunks(
                     for args in process_args
                 ]
 
-                for future in as_completed(futures):
-                    try:
-                        chunks_with_tokens, percentile, average_tokens = future.result()
-                        if chunks_with_tokens is not None:
-                            valid_results.append(
-                                (chunks_with_tokens, percentile, average_tokens)
-                            )
-                    except Exception as e:
-                        logger.error(f"Error processing future: {str(e)}")
-                        continue
+                try:
+                    for future in as_completed(futures, timeout=WORKER_TIMEOUT):
+                        try:
+                            chunks_with_tokens, percentile, average_tokens = future.result()
+                            if chunks_with_tokens is not None:
+                                valid_results.append(
+                                    (chunks_with_tokens, percentile, average_tokens)
+                                )
+                        except Exception as e:
+                            logger.error(f"Error processing future: {str(e)}")
+                            continue
+                except TimeoutError:
+                    logger.error(
+                        f"Percentile search timed out after {WORKER_TIMEOUT}s. "
+                        f"Proceeding with results collected so far ({len(valid_results)} valid)."
+                    )
 
             if valid_results:
                 # We found at least one valid percentile, now refine with finer grain
@@ -819,20 +826,26 @@ def parallel_find_optimal_chunks(
                         for args in refined_args
                     ]
 
-                    for future in as_completed(futures):
-                        try:
-                            chunks_with_tokens, percentile, average_tokens = (
-                                future.result()
-                            )
-                            if chunks_with_tokens is not None:
-                                refined_results.append(
-                                    (chunks_with_tokens, percentile, average_tokens)
+                    try:
+                        for future in as_completed(futures, timeout=WORKER_TIMEOUT):
+                            try:
+                                chunks_with_tokens, percentile, average_tokens = (
+                                    future.result()
                                 )
-                        except Exception as e:
-                            logger.error(
-                                f"Error processing future in refinement: {str(e)}"
-                            )
-                            continue
+                                if chunks_with_tokens is not None:
+                                    refined_results.append(
+                                        (chunks_with_tokens, percentile, average_tokens)
+                                    )
+                            except Exception as e:
+                                logger.error(
+                                    f"Error processing future in refinement: {str(e)}"
+                                )
+                                continue
+                    except TimeoutError:
+                        logger.error(
+                            f"Refined percentile search timed out after {WORKER_TIMEOUT}s. "
+                            f"Proceeding with results collected so far ({len(refined_results)} valid)."
+                        )
 
                 # Combine results and select the best one
                 all_results = valid_results + refined_results
