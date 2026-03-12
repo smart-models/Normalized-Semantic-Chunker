@@ -573,3 +573,100 @@ class TestBearerTokenAuth:
                 headers={"Authorization": "Bearer "},
             )
         assert response.status_code == 403
+
+
+# =============================================================================
+# HIGH Bug Regression Tests
+# =============================================================================
+
+ENDPOINT = "/normalized_semantic_chunker/"
+
+
+class TestH1NonUtf8Encoding:
+    """H1: Non-UTF-8 files must be rejected with HTTP 400."""
+
+    def test_non_utf8_file_returns_400(self, client):
+        """Non-UTF-8 binary content must be rejected, not silently corrupted."""
+        latin1_bytes = "café résumé naïve".encode("latin-1")
+        response = client.post(
+            ENDPOINT,
+            files={"file": ("test.txt", latin1_bytes, "text/plain")},
+            params={"max_tokens": 200},
+        )
+        assert response.status_code == 400
+        assert "encoding" in response.json()["detail"].lower()
+
+
+class TestH2MergeMaxTokens:
+    """H2: merge_undersized_chunks must receive full max_tokens, not max_tokens//2."""
+
+    def test_merge_small_chunks_respects_max_tokens(self, client):
+        """merge_small_chunks=true must not cause 5xx and all chunks must stay within max_tokens."""
+        text = " ".join(["Yes." * 3] * 60)
+        response = client.post(
+            ENDPOINT,
+            files={"file": ("test.txt", text.encode("utf-8"), "text/plain")},
+            params={"max_tokens": 200, "merge_small_chunks": True},
+        )
+        assert response.status_code == 200
+        chunks = response.json()["chunks"]
+        assert all(c["token_count"] <= 200 for c in chunks), (
+            "All chunks must respect max_tokens after merge+split pipeline"
+        )
+
+
+class TestH3MergeDoubleProcess:
+    """H3: After a merge, target_idx must not be re-processed in the same pass."""
+
+    def test_merge_does_not_produce_oversized_chunks(self, client):
+        """merge_undersized_chunks must not produce chunks exceeding max_tokens via double-merging."""
+        short_sentences = " ".join(["OK." for _ in range(200)])
+        response = client.post(
+            ENDPOINT,
+            files={"file": ("test.txt", short_sentences.encode("utf-8"), "text/plain")},
+            params={"max_tokens": 50, "merge_small_chunks": True, "merge_passes": 3},
+        )
+        assert response.status_code == 200
+        chunks = response.json()["chunks"]
+        for chunk in chunks:
+            assert chunk["token_count"] <= 50, (
+                f"Chunk exceeds max_tokens=50 (token_count={chunk['token_count']}). "
+                "Possible double-merge without target_idx guard."
+            )
+
+
+class TestH6SingleSentence:
+    """H6: Single-sentence documents must return HTTP 400, not 500."""
+
+    def test_single_sentence_document_returns_400(self, client):
+        """A document with only one sentence must return 400, not 500."""
+        response = client.post(
+            ENDPOINT,
+            files={"file": ("test.txt", b"Hello world.", "text/plain")},
+            params={"max_tokens": 200},
+        )
+        assert response.status_code == 400
+        assert "sentence" in response.json()["detail"].lower()
+
+
+class TestH7H8JsonLimits:
+    """H7/H8: JSON payload must be guarded before json.loads and per-chunk text size must be limited."""
+
+    def test_json_oversized_single_chunk_returns_400(self, client):
+        """A JSON file where a single chunk exceeds MAX_CHUNK_TEXT_SIZE must return 400."""
+        huge_text = "a" * 200_000  # 200k chars, above 100k default
+        payload = json.dumps({"chunks": [{"text": huge_text}]}).encode("utf-8")
+        response = client.post(
+            ENDPOINT,
+            files={"file": ("test.json", payload, "application/json")},
+            params={"max_tokens": 200},
+        )
+        assert response.status_code == 400
+        assert "chunk" in response.json()["detail"].lower()
+
+    def test_json_content_size_check_before_parse(self):
+        """parse_json_content raises ValueError for oversized raw content."""
+        from normalized_semantic_chunker import parse_json_content, MAX_FILE_SIZE
+        oversized = b'{"chunks": [{"text": "' + b"x" * (MAX_FILE_SIZE + 1) + b'"}]}'
+        with pytest.raises(ValueError, match="too large"):
+            parse_json_content(oversized)

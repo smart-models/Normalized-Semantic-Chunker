@@ -51,6 +51,7 @@ EMBEDDER_MODEL = os.environ.get(
     "EMBEDDER_MODEL", "sentence-transformers/all-MiniLM-L6-v2"
 )
 MAX_FILE_SIZE = int(os.environ.get("MAX_FILE_SIZE", 10 * 1024 * 1024))  # 10MB default
+MAX_CHUNK_TEXT_SIZE = int(os.environ.get("MAX_CHUNK_TEXT_SIZE", 100_000))  # 100k chars per chunk
 MAX_WORKERS = max(
     1, int(os.environ.get("MAX_WORKERS", min(multiprocessing.cpu_count() - 1, 4)))
 )
@@ -1010,6 +1011,7 @@ async def merge_undersized_chunks(
             }
             current_chunks[removed_idx] = None
             merged_indices.add(removed_idx)
+            merged_indices.add(target_idx)   # prevent re-processing in same pass
             merged_count += 1
 
         # Compact the list (remove None values) for next pass
@@ -1178,6 +1180,15 @@ def parse_json_content(content: bytes) -> List[str]:
     Raises:
         ValueError: With specific messages for different validation failures
     """
+    # H7: Guard against OOM from enormous JSON payloads before parsing.
+    # Defence-in-depth: the HTTP upload layer already enforces MAX_FILE_SIZE on
+    # raw upload bytes; this guard covers any call path that bypasses that layer.
+    if len(content) > MAX_FILE_SIZE:
+        raise ValueError(
+            f"JSON content is too large ({len(content)} bytes). "
+            f"Maximum allowed size is {MAX_FILE_SIZE} bytes."
+        )
+
     try:
         data = json.loads(content)
         if not isinstance(data, dict):
@@ -1194,7 +1205,7 @@ def parse_json_content(content: bytes) -> List[str]:
         if len(data["chunks"]) > MAX_CHUNKS:
             raise ValueError(f"JSON contains too many chunks (max: {MAX_CHUNKS})")
 
-        chunks = []
+        raw_chunks = []
         for i, item in enumerate(data["chunks"], 1):
             if not isinstance(item, dict):
                 raise ValueError(f"Chunk {i} must be an object")
@@ -1205,23 +1216,35 @@ def parse_json_content(content: bytes) -> List[str]:
             if not isinstance(item["text"], str):
                 raise ValueError(f"Chunk {i} 'text' must be a string")
 
-            # Skip empty strings after stripping
             text = item["text"].strip()
-            if text:
-                chunks.append(text)
-
-        if not chunks:
-            raise ValueError("No valid text chunks found in JSON")
-
-        # Detailed logging is handled by the caller based on verbosity setting
-        return chunks
+            raw_chunks.append((i, text))
 
     except json.JSONDecodeError as e:
         logger.error(f"Invalid JSON format: {str(e)}")
         raise ValueError(f"Invalid JSON format: {str(e)}")
+    except ValueError:
+        raise  # re-raise our own validation errors unmodified
     except Exception as e:
         logger.error(f"Error parsing JSON: {str(e)}")
         raise ValueError(f"Error parsing JSON: {str(e)}")
+
+    # H8: Per-chunk text size validation — done OUTSIDE the JSON try/except so
+    # that errors surface with a clear message, not wrapped as "Error parsing JSON".
+    chunks = []
+    for i, text in raw_chunks:
+        if len(text) > MAX_CHUNK_TEXT_SIZE:
+            raise ValueError(
+                f"Chunk {i} text exceeds maximum allowed size "
+                f"({len(text)} chars > {MAX_CHUNK_TEXT_SIZE})."
+            )
+        if text:
+            chunks.append(text)
+
+    if not chunks:
+        raise ValueError("No valid text chunks found in JSON")
+
+    # Detailed logging is handled by the caller based on verbosity setting
+    return chunks
 
 
 def parse_chunk_metadata(metadata_json: Optional[str]) -> Optional[Any]:
@@ -1403,8 +1426,14 @@ async def Normalized_Semantic_Chunker(
             try:
                 text = content.decode("utf-8")
             except UnicodeDecodeError:
-                # Try with different encoding if UTF-8 fails
-                text = content.decode("latin-1")
+                logger.warning(
+                    f"File '{file.filename}' is not valid UTF-8. "
+                    "Only UTF-8 encoded files are accepted."
+                )
+                raise HTTPException(
+                    status_code=400,
+                    detail="File encoding is not supported. Please upload a UTF-8 encoded file.",
+                )
 
             # Step 1: Split the document into sentences
             logger.info("Step 1 - Text Splitting")
@@ -1440,6 +1469,12 @@ async def Normalized_Semantic_Chunker(
             raise HTTPException(
                 status_code=400,
                 detail="No valid sentences found in the document. Please check the content.",
+            )
+
+        if len(sentences) < 2:
+            raise HTTPException(
+                status_code=400,
+                detail="Document must contain at least 2 sentences to perform semantic chunking.",
             )
 
         # Step 2: Vector embedding
@@ -1529,7 +1564,7 @@ async def Normalized_Semantic_Chunker(
             final_chunks = await merge_undersized_chunks(
                 chunks=final_chunks,
                 min_token_threshold=percentile_5th,
-                max_tokens=input_data.max_tokens // 2,
+                max_tokens=input_data.max_tokens,
                 model=input_data.model,
                 verbosity=input_data.verbosity,
                 max_passes=input_data.merge_passes,
