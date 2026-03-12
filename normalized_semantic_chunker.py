@@ -1080,7 +1080,8 @@ async def merge_undersized_chunks(
 
     logger.info(
         f"Merge completed: {len(chunks)} → {len(current_chunks)} chunks "
-        f"({total_merged} merged), undersized: {initial_undersized} → {final_undersized}"
+        f"({total_merged} merged), undersized: {initial_undersized} → {final_undersized} "
+        f"(before oversized-chunk splitting — Step 7 may reintroduce small sub-chunks)"
     )
 
     return current_chunks
@@ -1650,7 +1651,7 @@ async def Normalized_Semantic_Chunker(
                 f"After splitting: {len(final_chunks)} total chunks (increased from {chunks_before_split} to {len(final_chunks)}, +{len(final_chunks) - chunks_before_split})"
             )
 
-        logger.info("Step 8 - Semantic Chunking Statistics after processing")
+        logger.info("Step 8 - Semantic Chunking Statistics after processing (post-split final state)")
 
         # Final statistics always shown regardless of verbosity
         logger.info(f"Mean tokens: {mean_tokens_after_split:.2f}")
