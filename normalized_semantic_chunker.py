@@ -348,6 +348,10 @@ async def get_embeddings(
     Raises:
         HTTPException: If there's an error during the embedding process.
     """
+    if not doc:
+        logger.warning("get_embeddings called with empty document list — returning empty dict")
+        return {}
+
     try:
         # Carica modello in RAM se non presente
         await _get_model(model)
@@ -375,11 +379,14 @@ async def get_embeddings(
                 normalize_embeddings=normalize_embeddings,
             )
 
-        # Costruisce il dizionario fuori dal lock (operazione CPU pura)
-        result = {
-            sentence: embedding.tolist()
-            for sentence, embedding in zip(doc, embeddings)
-        }
+        # Costruisce il dizionario fuori dal lock (operazione CPU pura).
+        # Per frasi duplicate si conserva solo il primo embedding: SentenceTransformer
+        # è deterministico (stesso testo → stesso vettore), quindi first/last sono
+        # equivalenti, ma "first" è più prevedibile e coerente con l'ordine originale.
+        result = {}
+        for sentence, embedding in zip(doc, embeddings):
+            if sentence not in result:
+                result[sentence] = embedding.tolist()
 
         return result
 
@@ -421,6 +428,8 @@ def calculate_similarity(
             similarities = []
 
             for i in range(0, len(vectors) - 1, batch_size):
+                # Compute similarities for pairs (i, i+1) through (end_idx-1, end_idx).
+                # Both slices have equal length (end_idx - i), so element-wise ops are safe.
                 end_idx = min(i + batch_size, len(vectors) - 1)
                 batch_vectors1 = torch.tensor(
                     vectors[i:end_idx], dtype=torch.float32, device=device
@@ -812,6 +821,8 @@ def parallel_find_optimal_chunks(
                 # Perform a refined search around the best valid percentile
                 refined_start = min(99, best_valid_percentile + initial_step_size)
                 refined_end = max(1, best_valid_percentile - initial_step_size)
+                # Ensure range is non-empty: stop must be strictly less than start
+                refined_end = min(refined_end, refined_start - 1)
                 refined_percentiles = range(refined_start, refined_end, -1)
 
                 refined_args = [
@@ -1113,8 +1124,9 @@ def split_oversized_chunk(
 
             # If adding this sentence would exceed max_tokens, finalize current chunk
             if current_tokens + tokens > max_tokens:
+                joined = " ".join(current_chunk)
                 chunks.append(
-                    {"text": " ".join(current_chunk), "token_count": current_tokens}
+                    {"text": joined, "token_count": _count_tokens_for_text((joined, "cl100k_base"))}
                 )
                 current_chunk = []
                 current_tokens = 0
@@ -1125,8 +1137,9 @@ def split_oversized_chunk(
                 and sentence[-1] in ".!?"
                 and len(current_chunk) > 0
             ):
+                joined = " ".join(current_chunk)
                 chunks.append(
-                    {"text": " ".join(current_chunk), "token_count": current_tokens}
+                    {"text": joined, "token_count": _count_tokens_for_text((joined, "cl100k_base"))}
                 )
                 current_chunk = []
                 current_tokens = 0
@@ -1137,8 +1150,9 @@ def split_oversized_chunk(
 
         # Add final chunk if there's anything remaining
         if current_chunk:
+            joined = " ".join(current_chunk)
             chunks.append(
-                {"text": " ".join(current_chunk), "token_count": current_tokens}
+                {"text": joined, "token_count": _count_tokens_for_text((joined, "cl100k_base"))}
             )
 
         return chunks
@@ -1631,10 +1645,11 @@ async def Normalized_Semantic_Chunker(
         )
         if has_explicit_metadata:
             if isinstance(parsed_metadata, dict):
+                _RESERVED_CHUNK_KEYS = {"text", "token_count", "id"}
                 metadata_payload = {
                     key: value
                     for key, value in parsed_metadata.items()
-                    if key not in {"text", "token_count", "id"}
+                    if key.lower() not in _RESERVED_CHUNK_KEYS
                 }
             else:
                 # Wrap non-dict values (including None from JSON null) in chunk_metadata

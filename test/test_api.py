@@ -670,3 +670,85 @@ class TestH7H8JsonLimits:
         oversized = b'{"chunks": [{"text": "' + b"x" * (MAX_FILE_SIZE + 1) + b'"}]}'
         with pytest.raises(ValueError, match="too large"):
             parse_json_content(oversized)
+
+
+# =============================================================================
+# MEDIUM Bug Regression Tests
+# =============================================================================
+
+class TestM3TokenCountAccuracy:
+    """M3: split_oversized_chunk must report accurate token counts (including join spaces)."""
+
+    def test_split_oversized_chunk_token_count_accurate(self, client):
+        """token_count must match actual token count within ±1 tolerance."""
+        import tiktoken
+        enc = tiktoken.get_encoding("cl100k_base")
+        # Repetitive long text forces split_oversized_chunk
+        long_text = "This is a test sentence that will be repeated many times. " * 50
+        response = client.post(
+            "/normalized_semantic_chunker/",
+            files={"file": ("test.txt", long_text.encode("utf-8"), "text/plain")},
+            params={"max_tokens": 100},
+        )
+        assert response.status_code == 200
+        chunks = response.json()["chunks"]
+        for chunk in chunks:
+            actual = len(enc.encode(chunk["text"]))
+            reported = chunk["token_count"]
+            assert abs(actual - reported) <= 1, (
+                f"Token count mismatch: reported={reported}, actual={actual}, "
+                f"text='{chunk['text'][:60]}...'"
+            )
+
+
+class TestM4DuplicateSentences:
+    """M4: Documents with duplicate sentences must process correctly."""
+
+    def test_duplicate_sentences_no_crash(self, client):
+        """Repeated sentences must not cause crashes or empty results."""
+        text = "The cat sat on the mat. " * 30 + "A completely different sentence here. " * 5
+        response = client.post(
+            "/normalized_semantic_chunker/",
+            files={"file": ("test.txt", text.encode("utf-8"), "text/plain")},
+            params={"max_tokens": 200},
+        )
+        assert response.status_code == 200
+        chunks = response.json()["chunks"]
+        assert len(chunks) >= 1
+        for chunk in chunks:
+            assert chunk["token_count"] > 0
+
+
+class TestM5CaseInsensitiveMetadataFilter:
+    """M5: Reserved chunk fields must be filtered case-insensitively from metadata."""
+
+    def test_uppercase_reserved_keys_filtered(self, client, alice_path):
+        """Metadata keys like 'Text', 'ID', 'Token_Count' must not shadow chunk fields."""
+        import json as _json
+        metadata = {"Text": "SHADOW", "ID": 9999, "Token_Count": 0, "custom": "ok"}
+        with open(alice_path, "rb") as f:
+            response = client.post(
+                "/normalized_semantic_chunker/",
+                files={"file": ("alice_in_wonderland.txt", f, "text/plain")},
+                params={"max_tokens": 500, "chunk_metadata_json": _json.dumps(metadata)},
+            )
+        assert response.status_code == 200
+        chunks = response.json()["chunks"]
+        for chunk in chunks:
+            assert "Text" not in chunk
+            assert "ID" not in chunk
+            assert "Token_Count" not in chunk
+            assert chunk.get("custom") == "ok"
+            assert isinstance(chunk["text"], str) and chunk["text"] != "SHADOW"
+            assert isinstance(chunk["id"], int) and chunk["id"] != 9999
+
+
+class TestM6GetEmbeddingsEmpty:
+    """M6: get_embeddings with empty list must return {} without touching the model."""
+
+    def test_get_embeddings_empty_returns_empty_dict(self):
+        """get_embeddings([]) must return {} immediately."""
+        import asyncio
+        from normalized_semantic_chunker import get_embeddings
+        result = asyncio.get_event_loop().run_until_complete(get_embeddings([]))
+        assert result == {}
