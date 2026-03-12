@@ -7,7 +7,7 @@ import re
 import psutil
 import tiktoken
 import torch
-import threading
+import asyncio
 import multiprocessing
 import numpy as np
 from logging.handlers import RotatingFileHandler
@@ -59,14 +59,23 @@ CACHE_TIMEOUT = int(os.environ.get("CACHE_TIMEOUT", 3600))  # 1 hour in seconds
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _model_lock, _gpu_lock
+
+    # Inizializza i lock nell'event loop attivo (non a livello di modulo)
+    _model_lock = asyncio.Lock()
+    _gpu_lock = asyncio.Lock()
+
     logger.info(
         f"Loading embedding model {EMBEDDER_MODEL} during application startup..."
     )
     try:
-        _get_model(EMBEDDER_MODEL)
-        logger.info("Embedding model loaded successfully.")
+        await _get_model(EMBEDDER_MODEL)
+        async with _gpu_lock:
+            await _load_model_to_gpu(EMBEDDER_MODEL)
+        logger.info("Embedding model loaded and ready on device.")
     except Exception as e:
         logger.error(f"Failed to load embedding model: {str(e)}")
+        raise RuntimeError(f"Cannot start: embedding model failed to load: {e}") from e
 
     yield
 
@@ -74,7 +83,7 @@ async def lifespan(app: FastAPI):
     logger.info("Application shutting down, cleaning up resources...")
     try:
         # Cleanup model cache
-        with _model_lock:
+        async with _model_lock:
             for model_name in list(_model_cache.keys()):
                 if model_name in _model_cache:
                     del _model_cache[model_name]
@@ -143,13 +152,14 @@ logger.addHandler(file_handler)
 
 
 # Create a singleton for model caching with expiration
-_model_cache = {}
-_model_last_used = {}
-_model_lock = multiprocessing.RLock()  # Process-safe lock for model cache
-_encoding_lock = threading.Lock()  # Thread-safe lock for model encoding (GPU/CPU moves)
+_model_cache: dict = {}
+_model_last_used: dict = {}
+_model_lock: Optional[asyncio.Lock] = None        # inizializzato nel lifespan
+_gpu_lock: Optional[asyncio.Lock] = None          # inizializzato nel lifespan — un solo modello in VRAM alla volta
+_current_gpu_model: Optional[str] = None          # nome del modello attualmente in VRAM
 
 
-def _get_model(model_name: str) -> SentenceTransformer:
+async def _get_model(model_name: str) -> SentenceTransformer:
     """Get model from cache or load it into RAM with cache expiration.
 
     Args:
@@ -158,26 +168,24 @@ def _get_model(model_name: str) -> SentenceTransformer:
     Returns:
         SentenceTransformer: The loaded model instance.
     """
+    global _model_cache, _model_last_used
+
     current_time = time.time()
 
-    with _model_lock:
-        # Check for expired models first
+    async with _model_lock:
+        # Check for expired models first (solo RAM, non tocca VRAM — gestita da _evict_gpu_model)
         expired_models = [
             name
             for name, last_used in _model_last_used.items()
             if current_time - last_used > CACHE_TIMEOUT
         ]
 
-        # Remove expired models
+        # Remove expired models from RAM
         for name in expired_models:
-            if (
-                name in _model_cache and name != model_name
-            ):  # Don't remove the one we're about to use
+            if name in _model_cache and name != model_name:
                 logger.info(f"Removing expired model {name} from cache")
                 del _model_cache[name]
                 del _model_last_used[name]
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
 
         # Update or load the requested model
         if model_name not in _model_cache:
@@ -210,6 +218,54 @@ def _get_model(model_name: str) -> SentenceTransformer:
         _model_last_used[model_name] = current_time
 
         return _model_cache[model_name]
+
+
+async def _evict_gpu_model() -> None:
+    """Rimuove il modello corrente dalla VRAM e lo mantiene in RAM.
+
+    DEVE essere chiamata mentre si detiene _gpu_lock.
+    """
+    global _current_gpu_model
+
+    if _current_gpu_model is None or not torch.cuda.is_available():
+        return
+
+    model = _model_cache.get(_current_gpu_model)
+    if model is not None:
+        _model_cache[_current_gpu_model] = model.cpu()  # assegnazione corretta — evita il leak
+        logger.info(f"Evicted model '{_current_gpu_model}' from VRAM, kept in RAM")
+
+    torch.cuda.empty_cache()
+    _current_gpu_model = None
+
+
+async def _load_model_to_gpu(model_name: str) -> SentenceTransformer:
+    """Carica il modello richiesto in VRAM, evictando quello precedente se necessario.
+
+    DEVE essere chiamata mentre si detiene _gpu_lock.
+    Il modello deve essere già in _model_cache (caricato da _get_model).
+    """
+    global _current_gpu_model
+
+    if not torch.cuda.is_available():
+        # Nessuna GPU: ritorna il modello in RAM così com'è
+        return _model_cache[model_name]
+
+    if _current_gpu_model == model_name:
+        # Modello già in VRAM — nessun overhead
+        return _model_cache[model_name]
+
+    # Evict modello precedente dalla VRAM
+    if _current_gpu_model is not None:
+        await _evict_gpu_model()
+
+    # Carica il nuovo modello in VRAM
+    device = torch.device("cuda")
+    _model_cache[model_name] = _model_cache[model_name].to(device)
+    _current_gpu_model = model_name
+    logger.info(f"Loaded model '{model_name}' to VRAM")
+
+    return _model_cache[model_name]
 
 
 def split_into_sentences(doc: str) -> List[str]:
@@ -266,11 +322,11 @@ def split_into_sentences(doc: str) -> List[str]:
     return [s for s in sentences if s]
 
 
-def get_embeddings(
+async def get_embeddings(
     doc: List[str],
     model: str = EMBEDDER_MODEL,
-    batch_size: int = 8,  # Increased from 4 to 8 for better performance
-    verbosity: bool = False,  # Changed to False by default
+    batch_size: int = 8,
+    verbosity: bool = False,
     convert_to_numpy: bool = True,
     normalize_embeddings: bool = True,
 ) -> dict[str, List[float]]:
@@ -291,52 +347,44 @@ def get_embeddings(
         HTTPException: If there's an error during the embedding process.
     """
     try:
-        # Get model from cache (loads from disk if not in RAM)
-        model_instance = _get_model(model)
+        # Carica modello in RAM se non presente
+        await _get_model(model)
 
-        # Choose device and batch size appropriately
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-        # Adjust batch size based on document size to prevent OOM errors
+        # Aggiusta batch size per documenti grandi
+        effective_batch_size = batch_size
         if len(doc) > 1000:
-            batch_size = max(1, batch_size // 2)
+            effective_batch_size = max(1, batch_size // 2)
             if verbosity:
                 logger.info(
-                    f"Large document detected, reducing batch size to {batch_size}"
+                    f"Large document detected, reducing batch size to {effective_batch_size}"
                 )
 
-        # Use lock to prevent race conditions when moving model between devices
-        with _encoding_lock:
-            # Move to GPU if available
-            if torch.cuda.is_available():
-                model_instance = model_instance.to(device)
+        # Garantisce che il modello corretto sia in VRAM (serializza lo switch tra modelli)
+        async with _gpu_lock:
+            active_model = await _load_model_to_gpu(model)
 
-            # Get embeddings
-            embeddings = model_instance.encode(
+            # Esegui encode in un thread separato per non bloccare l'event loop
+            embeddings = await asyncio.to_thread(
+                active_model.encode,
                 doc,
-                batch_size=batch_size,
+                batch_size=effective_batch_size,
                 show_progress_bar=verbosity,
                 convert_to_numpy=convert_to_numpy,
                 normalize_embeddings=normalize_embeddings,
             )
 
-            # Create dictionary mapping sentences to embeddings
-            result = {
-                sentence: embedding.tolist()
-                for sentence, embedding in zip(doc, embeddings)
-            }
-
-            # Cleanup GPU memory but keep model in RAM
-            if torch.cuda.is_available():
-                model_instance.cpu()
-                del embeddings
-                torch.cuda.empty_cache()
+        # Costruisce il dizionario fuori dal lock (operazione CPU pura)
+        result = {
+            sentence: embedding.tolist()
+            for sentence, embedding in zip(doc, embeddings)
+        }
 
         return result
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error generating embeddings: {str(e)}")
-        # Clean GPU memory in case of error too
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         raise HTTPException(
@@ -812,7 +860,7 @@ def parallel_find_optimal_chunks(
         return _find_optimal_chunks(sentences, distance, max_tokens)
 
 
-def merge_undersized_chunks(
+async def merge_undersized_chunks(
     chunks: List[dict],
     min_token_threshold: float,
     max_tokens: int,
@@ -878,7 +926,7 @@ def merge_undersized_chunks(
 
         # Calculate embeddings for all current chunks
         chunk_texts = [chunk["text"] for chunk in current_chunks]
-        embeddings_dict = get_embeddings(
+        embeddings_dict = await get_embeddings(
             doc=chunk_texts,
             model=model,
             batch_size=8,
@@ -1398,7 +1446,7 @@ async def Normalized_Semantic_Chunker(
 
         # Step 2: Vector embedding
         logger.info("Step 2 - Vector Embedding")
-        embeddings_dict = get_embeddings(
+        embeddings_dict = await get_embeddings(
             sentences,
             model=input_data.model,
             verbosity=input_data.verbosity,
@@ -1480,7 +1528,7 @@ async def Normalized_Semantic_Chunker(
                 logger.info(
                     f"Merge process for chunks under 5th percentile (threshold: {percentile_5th:.2f} tokens)"
                 )
-            final_chunks = merge_undersized_chunks(
+            final_chunks = await merge_undersized_chunks(
                 chunks=final_chunks,
                 min_token_threshold=percentile_5th,
                 max_tokens=input_data.max_tokens // 2,
