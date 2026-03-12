@@ -14,7 +14,7 @@ Essentially, it's a smart text splitter designed to keep related ideas together 
 
 To use this service, you need to send it a request containing:
 
-*   **A Text File:** You must upload a file containing the text you want to chunk. The code specifically allows files ending in `.txt`, `.md` (Markdown), or `.json` (JSON).
+*   **A Text File:** You must upload a file containing the text you want to chunk. The code allows files ending in `.txt`, `.md` (Markdown), or `.json` (JSON). Text files must be **UTF-8 encoded** (non-UTF-8 files are rejected) and must contain **at least 2 sentences**.
 *   **Maximum Tokens:** You need to tell the code the maximum number of tokens (words/word pieces) allowed in each chunk. This is a required number and must be greater than zero.
 *   **(Optional) Model Name:** The code uses a specific AI model (called an "embedding model") to understand the meaning of sentences. By default, it uses one called `"sentence-transformers/all-MiniLM-L6-v2"`, but you can optionally specify a different compatible model name if needed.
 *   **(Optional) Merge Small Chunks:** You can specify whether to merge undersized chunks with semantically similar neighbors (default: `true`).
@@ -59,7 +59,7 @@ When the code successfully processes your file, it sends back a result containin
     *   `source`: The name of the file that was uploaded.
     *   `processing_time`: How long the whole process took in seconds.
 
-The code also includes a simple "health check" address (`/`) that just confirms the service is running and whether it can use a GPU (a powerful type of processor).
+The code also includes a simple "health check" address (`/`) that confirms the service is running, whether it can use a GPU, whether the default embedding model is loaded and ready (`model_loaded`), and how many models are currently held in memory (`models_in_cache`).
 
 **4. How it Achieves its Purpose (Logic and Algorithms)**
 

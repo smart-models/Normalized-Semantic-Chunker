@@ -51,6 +51,8 @@ Whether working with long documents, varied content structures, or token-sensiti
 - [Using the API](#using-the-api)
   - [API Endpoints](#api-endpoints)
   - [Authentication](#authentication)
+  - [Environment Variables](#environment-variables)
+  - [Input Constraints](#input-constraints)
   - [Example API Call](#example-api-call)
   - [Response Format](#response-format)
 - [Contributing](#contributing)
@@ -304,7 +306,7 @@ If you prefer to build the Docker image locally or need to customize it:
   Chunks a text document into semantically coherent segments while controlling token size.
   
   **Parameters:**
-  - `file`: The text file to be chunked (supports .txt, .md, and .json formats)
+  - `file`: The text file to be chunked (supports .txt, .md, and .json formats). Must be UTF-8 encoded. Text files must contain at least 2 sentences.
   - `max_tokens`: Maximum token count per chunk (integer, required)
   - `model`: Embedding model to use for semantic analysis (string, default: `sentence-transformers/all-MiniLM-L6-v2`)
   - `merge_small_chunks`: Whether to merge undersized chunks (boolean, default: `true`)
@@ -337,7 +339,13 @@ If you prefer to build the Docker image locally or need to customize it:
   The service will process each text chunk individually, maintaining the chunk boundaries provided in your JSON file, then apply semantic chunking within those boundaries as needed. Additional metadata fields beyond `text` are allowed and will be ignored during processing, so you can include any extra information you need while still having the JSON process correctly.
 
 - **GET `/`**
-  Health check endpoint that returns service status, GPU availability, and API version. Always accessible, no authentication required.
+  Health check endpoint. Always accessible, no authentication required. Returns:
+  - `status`: `"healthy"` when the service is running
+  - `gpu_available`: whether a CUDA-capable GPU is detected
+  - `version`: API version
+  - `default_model`: name of the default embedding model
+  - `model_loaded`: whether the default embedding model is loaded and ready
+  - `models_in_cache`: number of models currently cached in memory
 
 ### Authentication
 
@@ -368,6 +376,29 @@ API_TOKEN=your-secret-token
   "detail": "Invalid or missing API token"
 }
 ```
+
+### Environment Variables
+
+The service behaviour can be tuned via environment variables (set in `docker/.env` or exported before running):
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `API_TOKEN` | *(empty)* | Bearer token for authentication. Leave empty to disable. |
+| `MAX_FILE_SIZE` | `10485760` | Maximum upload size in bytes (10 MB). |
+| `MAX_CHUNK_TEXT_SIZE` | `100000` | Maximum characters allowed per chunk text field in JSON input. Chunks exceeding this are rejected with HTTP 400. |
+| `MAX_WORKERS` | auto | Maximum parallel worker processes for percentile search (default: CPU count − 1, max 4). |
+| `WORKER_TIMEOUT` | `300` | Per-worker timeout in seconds. |
+| `CACHE_TIMEOUT` | `3600` | Seconds before an unused model is evicted from the in-memory cache. |
+| `EMBEDDER_MODEL` | `sentence-transformers/all-MiniLM-L6-v2` | Default embedding model loaded at startup. |
+
+Copy `docker/.env.example` to `docker/.env` and uncomment the variables you want to override.
+
+### Input Constraints
+
+- **Encoding**: text files (`.txt`, `.md`) must be **UTF-8 encoded**. Non-UTF-8 files are rejected with HTTP 400.
+- **Minimum length**: text files must contain **at least 2 sentences**. Single-sentence documents return HTTP 400.
+- **File size**: uploads are limited to `MAX_FILE_SIZE` (default 10 MB).
+- **JSON chunks**: each `text` field in a JSON input file must not exceed `MAX_CHUNK_TEXT_SIZE` characters (default 100 000). The total JSON payload is also limited to `MAX_FILE_SIZE`.
 
 ### Example API Call using cURL
 
