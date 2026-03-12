@@ -752,3 +752,41 @@ class TestM6GetEmbeddingsEmpty:
         from normalized_semantic_chunker import get_embeddings
         result = asyncio.get_event_loop().run_until_complete(get_embeddings([]))
         assert result == {}
+
+
+# =============================================================================
+# LOW Bug Regression Tests
+# =============================================================================
+
+class TestL2ConfigValidation:
+    """L2: Invalid env-var config must be rejected at startup via _validate_config."""
+
+    def test_validate_config_raises_on_invalid_values(self, monkeypatch):
+        """_validate_config must raise RuntimeError when config values are invalid."""
+        import normalized_semantic_chunker as nsc
+        monkeypatch.setattr(nsc, "WORKER_TIMEOUT", -1)
+        monkeypatch.setattr(nsc, "MAX_FILE_SIZE", 0)
+        with pytest.raises(RuntimeError, match="Invalid configuration"):
+            nsc._validate_config()
+
+    def test_validate_config_passes_on_valid_defaults(self):
+        """_validate_config must not raise with default configuration."""
+        import normalized_semantic_chunker as nsc
+        nsc._validate_config()  # must not raise
+
+
+class TestL9HealthEndpointModelStatus:
+    """L9: Health endpoint must report model loading status."""
+
+    def test_health_check_includes_model_status(self, client):
+        """Health endpoint must include model_loaded and models_in_cache fields."""
+        response = client.get("/")
+        assert response.status_code == 200
+        data = response.json()
+        assert "model_loaded" in data, "Missing 'model_loaded' field"
+        assert "models_in_cache" in data, "Missing 'models_in_cache' field"
+        assert isinstance(data["model_loaded"], bool)
+        assert isinstance(data["models_in_cache"], int)
+        # After app startup the default model must be loaded
+        assert data["model_loaded"] is True
+        assert data["models_in_cache"] >= 1

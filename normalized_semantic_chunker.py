@@ -59,9 +59,28 @@ CACHE_TIMEOUT = int(os.environ.get("CACHE_TIMEOUT", 3600))  # 1 hour in seconds
 WORKER_TIMEOUT = int(os.environ.get("WORKER_TIMEOUT", 300))  # 5 minutes default
 
 
+def _validate_config() -> None:
+    """Validate critical configuration values. Raises RuntimeError on invalid config."""
+    errors = []
+    if MAX_FILE_SIZE <= 0:
+        errors.append(f"MAX_FILE_SIZE must be > 0, got {MAX_FILE_SIZE}")
+    if MAX_CHUNK_TEXT_SIZE <= 0:
+        errors.append(f"MAX_CHUNK_TEXT_SIZE must be > 0, got {MAX_CHUNK_TEXT_SIZE}")
+    if WORKER_TIMEOUT <= 0:
+        errors.append(f"WORKER_TIMEOUT must be > 0, got {WORKER_TIMEOUT}")
+    if CACHE_TIMEOUT <= 0:
+        errors.append(f"CACHE_TIMEOUT must be > 0, got {CACHE_TIMEOUT}")
+    if MAX_WORKERS < 1:
+        errors.append(f"MAX_WORKERS must be >= 1, got {MAX_WORKERS}")
+    if errors:
+        raise RuntimeError("Invalid configuration:\n" + "\n".join(f"  - {e}" for e in errors))
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _model_lock, _gpu_lock
+
+    _validate_config()  # Fail fast on invalid env-var configuration
 
     # Inizializza i lock nell'event loop attivo (non a livello di modulo)
     _model_lock = asyncio.Lock()
@@ -500,7 +519,10 @@ def calculate_similarity(
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         logger.error(f"Error calculating similarities: {str(e)}")
-        raise HTTPException(status_code=500, detail="Error calculating similarities")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error calculating similarities: {str(e)}",
+        )
 
 
 def _count_tokens_for_text(args: tuple[str, str]) -> int:
@@ -540,6 +562,9 @@ def _group_chunks_by_similarity(
             - Standard deviation of token counts
     """
     try:
+        if not (1 <= percentile <= 99):
+            logger.warning(f"percentile={percentile} is outside valid range [1, 99], clamping")
+            percentile = max(1, min(99, percentile))
         breakpoint = np.percentile(distance, percentile)
         indices_above_th = [i for i, x in enumerate(distance) if x > breakpoint]
 
@@ -665,8 +690,9 @@ def _find_optimal_chunks(
             return chunks_with_tokens, percentile, average_tokens
 
     # If no valid percentile found, return the entire text as a single chunk
-    logger.info(
-        "No valid chunking found using sequential approach - returning single chunk"
+    logger.warning(
+        "No valid chunking found using sequential approach - returning single chunk. "
+        "Consider increasing max_tokens or providing a longer document."
     )
     fallback_chunks = {
         " ".join(sentences): _count_tokens_for_text(
@@ -913,7 +939,8 @@ async def merge_undersized_chunks(
     )
 
     if initial_undersized == 0:
-        return chunks  # No small chunks to merge
+        logger.info("Merge skipped: no chunks below threshold")
+        return chunks
 
     # If most chunks are undersized, adjust the threshold (only once, before passes)
     adjusted_threshold = min_token_threshold
@@ -1051,11 +1078,10 @@ async def merge_undersized_chunks(
         1 for chunk in current_chunks if chunk["token_count"] < adjusted_threshold
     )
 
-    if verbosity:
-        logger.info(
-            f"Merge completed: {len(chunks)} → {len(current_chunks)} chunks "
-            f"({total_merged} merged), undersized: {initial_undersized} → {final_undersized}"
-        )
+    logger.info(
+        f"Merge completed: {len(chunks)} → {len(current_chunks)} chunks "
+        f"({total_merged} merged), undersized: {initial_undersized} → {final_undersized}"
+    )
 
     return current_chunks
 
@@ -1360,6 +1386,8 @@ async def health_check():
         "gpu_available": torch.cuda.is_available(),
         "version": app.version,
         "default_model": EMBEDDER_MODEL,
+        "model_loaded": EMBEDDER_MODEL in _model_cache,
+        "models_in_cache": len(_model_cache),
     }
 
 
@@ -1549,15 +1577,14 @@ async def Normalized_Semantic_Chunker(
         chunks_over_95th = sum(1 for count in token_counts if count > percentile_95th)
         chunks_in_range = total_chunks - chunks_under_5th - chunks_over_95th
 
-        # STEP 5: Add to log
-        logger.info("Step 5 - Distribution Statistics Calculation")
+        # STEP 5: Key stats always visible; detailed breakdown only in verbose mode
+        logger.info(
+            f"Step 5 - Distribution Statistics: {total_chunks} chunks, "
+            f"5th={percentile_5th:.0f} tokens, 95th={percentile_95th:.0f} tokens, "
+            f"mean={mean_tokens:.0f} tokens"
+        )
 
-        # Detailed statistics shown only in verbose mode
-        if input_data.verbosity:
-            logger.info(f"Mean tokens: {mean_tokens:.2f}")
-            logger.info(f"Total chunks: {total_chunks}")
-            logger.info(f"5th percentile threshold: {percentile_5th:.2f} tokens")
-            logger.info(f"95th percentile threshold: {percentile_95th:.2f} tokens")
+        if input_data.verbosity and total_chunks > 0:
             logger.info(
                 f"Number of chunks under 5th percentile: {chunks_under_5th} ({chunks_under_5th / total_chunks * 100:.2f}%)"
             )
@@ -1584,27 +1611,21 @@ async def Normalized_Semantic_Chunker(
                 max_passes=input_data.merge_passes,
             )
 
-        # STEP 7: Split oversized chunks
+        # STEP 7: Split oversized chunks (single-pass: identify and split in one iteration)
         logger.info("Step 7 - Split Oversized Chunks")
-        oversized_indices = [
-            i
-            for i, chunk in enumerate(final_chunks)
-            if chunk["token_count"] > input_data.max_tokens
-        ]
+        oversized_count = sum(
+            1 for chunk in final_chunks if chunk["token_count"] > input_data.max_tokens
+        )
 
-        if oversized_indices:
-            if input_data.verbosity:
-                logger.info(
-                    f"Starting split process for oversized chunks (95th percentile: {percentile_95th:.2f} tokens)"
-                )
-                logger.info(
-                    f"Found {len(oversized_indices)} chunks over threshold of {input_data.max_tokens} tokens"
-                )
+        if oversized_count and input_data.verbosity:
+            logger.info(
+                f"Found {oversized_count} chunks over threshold of {input_data.max_tokens} tokens "
+                f"(95th percentile: {percentile_95th:.2f} tokens)"
+            )
 
         normalized_chunks = []
-
-        for i, chunk in enumerate(final_chunks):
-            if i in oversized_indices:
+        for chunk in final_chunks:
+            if chunk["token_count"] > input_data.max_tokens:
                 sub_chunks = split_oversized_chunk(chunk["text"], input_data.max_tokens)
                 normalized_chunks.extend(sub_chunks)
             else:
