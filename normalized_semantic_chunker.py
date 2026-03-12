@@ -47,16 +47,30 @@ STEP_SIZE_LARGE_DOC = 5  # Step size for large documents
 STEP_SIZE_VERY_LARGE_DOC = 3  # Step size for very large documents
 
 ALLOWED_EXTENSIONS = {"txt", "md", "json"}
+
+
+def _get_int_env(name: str, default: int) -> int:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+
+    value = value.strip()
+    if not value:
+        return default
+
+    return int(value)
+
+
 EMBEDDER_MODEL = os.environ.get(
     "EMBEDDER_MODEL", "sentence-transformers/all-MiniLM-L6-v2"
 )
-MAX_FILE_SIZE = int(os.environ.get("MAX_FILE_SIZE", 10 * 1024 * 1024))  # 10MB default
-MAX_CHUNK_TEXT_SIZE = int(os.environ.get("MAX_CHUNK_TEXT_SIZE", 100_000))  # 100k chars per chunk
+MAX_FILE_SIZE = _get_int_env("MAX_FILE_SIZE", 10 * 1024 * 1024)  # 10MB default
+MAX_CHUNK_TEXT_SIZE = _get_int_env("MAX_CHUNK_TEXT_SIZE", 100_000)  # 100k chars per chunk
 MAX_WORKERS = max(
-    1, int(os.environ.get("MAX_WORKERS", min(multiprocessing.cpu_count() - 1, 4)))
+    1, _get_int_env("MAX_WORKERS", min(multiprocessing.cpu_count() - 1, 4))
 )
-CACHE_TIMEOUT = int(os.environ.get("CACHE_TIMEOUT", 3600))  # 1 hour in seconds
-WORKER_TIMEOUT = int(os.environ.get("WORKER_TIMEOUT", 300))  # 5 minutes default
+CACHE_TIMEOUT = _get_int_env("CACHE_TIMEOUT", 3600)  # 1 hour in seconds
+WORKER_TIMEOUT = _get_int_env("WORKER_TIMEOUT", 300)  # 5 minutes default
 
 
 def _validate_config() -> None:

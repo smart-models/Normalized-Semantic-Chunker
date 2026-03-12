@@ -44,7 +44,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Prepare image name
+      - name: Prepare image name and version
         id: image-name
         run: |
           LOWERCASE_IMAGE_NAME=$(echo "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}" | tr '[:upper:]' '[:lower:]')
@@ -52,7 +52,7 @@ jobs:
 
       - name: Extract version
         id: version
-        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
 
       - name: Extract Docker metadata
         id: meta
@@ -62,7 +62,8 @@ jobs:
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest
+            type=sha
+            type=raw,value=latest,enable=${{ !contains(github.ref, '-') }}
 
       - name: Build and push Docker image
         id: build
@@ -107,15 +108,20 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Pull and verify image
+      - name: Pull and verify versioned image
         run: |
           docker pull ${{ needs.build-and-push.outputs.image-name }}:${{ needs.build-and-push.outputs.version }}
+          echo "Versioned image verification successful"
+
+      - name: Pull and verify latest image
+        if: ${{ !contains(github.ref, '-') }}
+        run: |
           docker pull ${{ needs.build-and-push.outputs.image-name }}:latest
-          echo "Image verification successful"
+          echo "Latest image verification successful"
 
       - name: Inspect image
         run: |
-          docker inspect ${{ needs.build-and-push.outputs.image-name }}:latest --format '{{.Config.Labels}}' | tr ',' '\n'
+          docker inspect ${{ needs.build-and-push.outputs.image-name }}:${{ needs.build-and-push.outputs.version }} --format '{{.Config.Labels}}' | tr ',' '\n'
 
   cleanup-untagged:
     needs: [build-and-push, verify-image]
@@ -131,7 +137,7 @@ jobs:
           package-name: ${{ github.event.repository.name }}
           package-type: container
           delete-only-untagged-versions: true
-          min-versions-to-keep: 0
+          min-versions-to-keep: 3
         continue-on-error: true
 
   create-release:
@@ -148,7 +154,7 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ needs.build-and-push.outputs.version }}
+          tag_name: ${{ github.ref_name }}
           name: Release ${{ needs.build-and-push.outputs.version }}
           body: |
             ## Normalized Semantic Chunker - Docker Image Published
@@ -190,5 +196,5 @@ jobs:
 
             For more information, see the [README](https://github.com/${{ github.repository }}/blob/main/README.md).
           draft: false
-          prerelease: false
+          prerelease: ${{ contains(github.ref, '-') }}
           generate_release_notes: true
