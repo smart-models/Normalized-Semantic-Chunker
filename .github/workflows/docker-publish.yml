@@ -5,6 +5,11 @@ on:
     tags:
       - 'v*.*.*'
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build (e.g. v1.2.3). Leave empty for a dev build tagged as dev-<sha>.'
+        required: false
+        default: ''
 
 env:
   REGISTRY: ghcr.io
@@ -52,7 +57,15 @@ jobs:
 
       - name: Extract version
         id: version
-        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+          elif [[ -n "${{ inputs.tag }}" ]]; then
+            INPUT_TAG="${{ inputs.tag }}"
+            echo "VERSION=${INPUT_TAG#v}" >> $GITHUB_OUTPUT
+          else
+            echo "VERSION=dev-$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          fi
 
       - name: Extract Docker metadata
         id: meta
@@ -63,7 +76,8 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=sha
-            type=raw,value=latest,enable=${{ !contains(github.ref, '-') }}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/') && !contains(github.ref, '-') }}
+            type=raw,value=${{ steps.version.outputs.VERSION }},enable=${{ github.event_name == 'workflow_dispatch' && inputs.tag != '' }}
 
       - name: Build and push Docker image
         id: build
@@ -110,18 +124,32 @@ jobs:
 
       - name: Pull and verify versioned image
         run: |
-          docker pull ${{ needs.build-and-push.outputs.image-name }}:${{ needs.build-and-push.outputs.version }}
+          VERSION="${{ needs.build-and-push.outputs.version }}"
+          IMAGE="${{ needs.build-and-push.outputs.image-name }}"
+          DIGEST="${{ needs.build-and-push.outputs.digest }}"
+          if [[ "$VERSION" == dev-* ]]; then
+            docker pull "$IMAGE@$DIGEST"
+          else
+            docker pull "$IMAGE:$VERSION"
+          fi
           echo "Versioned image verification successful"
 
       - name: Pull and verify latest image
-        if: ${{ !contains(github.ref, '-') }}
+        if: ${{ !contains(github.ref, '-') && !startsWith(needs.build-and-push.outputs.version, 'dev-') }}
         run: |
           docker pull ${{ needs.build-and-push.outputs.image-name }}:latest
           echo "Latest image verification successful"
 
       - name: Inspect image
         run: |
-          docker inspect ${{ needs.build-and-push.outputs.image-name }}:${{ needs.build-and-push.outputs.version }} --format '{{.Config.Labels}}' | tr ',' '\n'
+          VERSION="${{ needs.build-and-push.outputs.version }}"
+          IMAGE="${{ needs.build-and-push.outputs.image-name }}"
+          DIGEST="${{ needs.build-and-push.outputs.digest }}"
+          if [[ "$VERSION" == dev-* ]]; then
+            docker inspect "$IMAGE@$DIGEST" --format '{{.Config.Labels}}' | tr ',' '\n'
+          else
+            docker inspect "$IMAGE:$VERSION" --format '{{.Config.Labels}}' | tr ',' '\n'
+          fi
 
   cleanup-untagged:
     needs: [build-and-push, verify-image]
@@ -142,6 +170,7 @@ jobs:
 
   create-release:
     needs: [build-and-push, verify-image]
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
 
     permissions:
